@@ -1,0 +1,10 @@
+{
+  "theme": "dark",
+  "defaultProvider": "cosine",
+  "defaultModel": "glm-5.2",
+  "defaultThinkingLevel": "high",
+  "packages": [
+    "npm:pi-web-access",
+    "npm:pi-mcp-adapter"
+  ]
+}

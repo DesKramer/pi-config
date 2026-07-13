@@ -1,0 +1,29 @@
+# dependencies / build output
+node_modules/
+dist/
+coverage/
+
+# secrets and machine-local Pi state
+.env
+.env.*
+!.env.example
+auth.json
+trust.json
+sessions/
+npm/
+git/
+mcp-cache.json
+mcp-npx-cache.json
+mcp-onboarding.json
+mcp-oauth/
+
+# never commit raw provider secrets; keep config/models.json using env-var refs
+config/models.local.json
+config/settings.local.json
+*.bak
+*.backup
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
