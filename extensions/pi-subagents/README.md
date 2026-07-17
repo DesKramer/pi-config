@@ -16,6 +16,8 @@ A [pi](https://github.com/earendil-works/pi) extension that registers a single `
 
 ## Usage
 
+Run `/agents` in the TUI to open a searchable preview of the currently registered agents, including each agent's description, model, thinking level, and tools.
+
 One tool call = one subagent:
 ```json
 { "agent": "scout", "task": "Find all auth-related files in src/" }

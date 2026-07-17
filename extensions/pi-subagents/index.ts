@@ -9,8 +9,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme, parseFrontmatter, truncateHead, withFileMutationQueue, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { DynamicBorder, getMarkdownTheme, parseFrontmatter, truncateHead, withFileMutationQueue, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, type SelectItem, SelectList, Spacer, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -822,6 +822,67 @@ export default function (pi: ExtensionAPI) {
 	if (SUBAGENT_ALLOWLIST) {
 		agents = agents.filter((a) => SUBAGENT_ALLOWLIST.includes(a.name));
 	}
+
+	pi.registerCommand("agents", {
+		description: "Preview available subagents",
+		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui") {
+				const names = agents.map((agent) => agent.name).join(", ") || "none";
+				ctx.ui.notify(`Available agents: ${names}`, "info");
+				return;
+			}
+
+			if (agents.length === 0) {
+				ctx.ui.notify("No subagents are currently available", "warning");
+				return;
+			}
+
+			const items: SelectItem[] = agents.map((agent) => ({
+				value: agent.name,
+				label: agent.name,
+				description: [
+					agent.description,
+					`${agent.model} · thinking: ${agent.thinking}`,
+					`tools: ${agent.tools.join(", ") || "none"}`,
+				].filter(Boolean).join(" · "),
+			}));
+
+			await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+				const container = new Container();
+				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+				container.addChild(new Text(
+					theme.fg("accent", theme.bold(`Available Agents (${agents.length})`)),
+					1,
+					0,
+				));
+
+				const list = new SelectList(items, Math.min(items.length, 12), {
+					selectedPrefix: (text) => theme.fg("accent", text),
+					selectedText: (text) => theme.fg("accent", text),
+					description: (text) => theme.fg("muted", text),
+					scrollInfo: (text) => theme.fg("dim", text),
+					noMatch: (text) => theme.fg("warning", text),
+				});
+				list.onSelect = () => done(undefined);
+				list.onCancel = () => done(undefined);
+				container.addChild(list);
+				container.addChild(new Text(theme.fg("dim", "↑↓ navigate · type to filter · enter/esc close"), 1, 0));
+				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+
+				return {
+					render: (width: number) => container.render(width),
+					invalidate: () => container.invalidate(),
+					handleInput: (data: string) => {
+						list.handleInput(data);
+						tui.requestRender();
+					},
+				};
+			}, {
+				overlay: true,
+				overlayOptions: { width: "80%", minWidth: 50, maxHeight: "80%" },
+			});
+		},
+	});
 
 	pi.registerTool({
 		name: "subagent",
