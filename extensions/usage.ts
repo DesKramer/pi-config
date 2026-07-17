@@ -350,7 +350,7 @@ function subagentRecordsFromEntries(entries: unknown[], sessionFile?: string): {
 	return { records, missingUsage };
 }
 
-function defaultSessionDir(): string {
+function defaultSessionsRoot(): string {
 	if (process.env.PI_CODING_AGENT_SESSION_DIR) return resolve(process.env.PI_CODING_AGENT_SESSION_DIR);
 	const agentDir = process.env.PI_CODING_AGENT_DIR
 		? resolve(process.env.PI_CODING_AGENT_DIR)
@@ -460,7 +460,7 @@ function formatReport(data: UsageReportData): string {
 	const lines = [
 		"Pi usage",
 		`Generated: ${new Date(data.generatedAt).toLocaleString()}`,
-		"Current = this session; time windows = all saved Pi sessions.",
+		"Current = this session; time windows = all saved Pi sessions under the session root.",
 		"",
 		[
 			padRight("Window", 12),
@@ -510,8 +510,7 @@ function buildSubagentWindows(now: number): SubagentWindowReport[] {
 
 async function collectUsage(ctx: any): Promise<UsageReportData> {
 	const now = Date.now();
-	const configuredSessionDir = ctx.sessionManager?.getSessionDir?.();
-	const sessionDir = configuredSessionDir ? String(configuredSessionDir) : defaultSessionDir();
+	const sessionDir = defaultSessionsRoot();
 	const currentSessionFile = ctx.sessionManager?.getSessionFile?.() || undefined;
 	const warnings: string[] = [];
 	const byKey = new Map<string, UsageRecord>();
@@ -601,7 +600,7 @@ export default function usageCommand(pi: ExtensionAPI): void {
 		if (expanded) {
 			const details = [
 				"",
-				`Session dir: ${data.sessionDir}`,
+				`Session scan root: ${data.sessionDir}`,
 				`Current session: ${data.currentSessionFile ?? "in-memory"}`,
 				...data.warnings.map((warning) => `Warning: ${warning}`),
 			].join("\n");

@@ -111,7 +111,7 @@ function loadConfig(): ExtensionConfig {
 const BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "grep", "find", "ls"]);
 
 // Custom tools that require loading an extension into the subagent process
-const EXT_BASE = path.join(process.env.HOME || "~", ".pi", "agent", "extensions");
+const EXT_BASE = path.dirname(EXT_DIR);
 const WEB_ACCESS_EXT = path.join(process.env.HOME || "~", ".pi", "agent", "npm", "node_modules", "pi-web-access", "index.ts");
 const FIRECRAWL_EXT = path.join(EXT_BASE, "firecrawl-tools.ts");
 const CUSTOM_TOOL_EXTENSIONS: Record<string, string> = {
