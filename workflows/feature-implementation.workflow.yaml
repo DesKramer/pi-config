@@ -1,0 +1,164 @@
+version: 1
+name: feature-implementation
+description: Build a feature through acceptance criteria, codebase discovery, non-overlapping implementation, and independent QA.
+artifacts:
+  acceptance_criteria:
+    type: text
+    description: Approved, testable acceptance criteria and resolved assumptions.
+  codebase_context:
+    type: text
+    description: Consolidated scout findings, relevant files, architecture, and integration constraints.
+  implementation_summary:
+    type: text
+    description: Worker responsibilities, files changed, decisions made, and verification performed.
+  qa_report:
+    type: text
+    description: QA findings mapped to the acceptance criteria, including gaps and evidence.
+start: acceptance
+steps:
+  acceptance:
+    type: delegate
+    instructions: |
+      Establish high-quality acceptance criteria for {{input.goal}}.
+      Ask the acceptance-criteria subagent to draft or refine them. If it identifies unanswered questions, ask the user, then call the subagent again with the answers. Stay in this step until the criteria are testable and the important ambiguities are resolved.
+    delegate:
+      agent: acceptance-criteria
+      parallel: false
+      guidance: |
+        The subagent is read-only. Give it the complete goal, relevant user answers, and any existing draft criteria.
+      task: |
+        Goal: {{input.goal}}
+
+        Produce concise, testable acceptance criteria. Identify blocking ambiguities as explicit questions. Do not design or implement the feature yet.
+    outputs:
+      - acceptance_criteria
+    transitions:
+      ready: scout
+      needs_clarification:
+        target: acceptance
+        requireOutputs: false
+      abort:
+        target: canceled
+        requireOutputs: false
+
+  scout:
+    type: delegate
+    instructions: |
+      Build focused codebase context for the approved criteria below. Generate distinct scout tasks that cover architecture, existing patterns, tests, and integration points without duplicating simple file reads.
+
+      {{artifacts.acceptance_criteria}}
+    delegate:
+      agents: [scout]
+      minCalls: 1
+      maxCalls: 4
+      parallel: true
+      guidance: |
+        Give every scout a distinct research question and exact scope. Consolidate their findings, including paths and important symbols, into codebase_context.
+      task: |
+        Goal: {{input.goal}}
+
+        Acceptance criteria:
+        {{artifacts.acceptance_criteria}}
+
+        Investigate one distinct aspect of the existing codebase. Return concrete paths, symbols, conventions, tests, and constraints. Do not edit files.
+    outputs:
+      - codebase_context
+    transitions:
+      complete: implement
+      insufficient_context:
+        target: scout
+        requireOutputs: false
+      abort:
+        target: canceled
+        requireOutputs: false
+
+  implement:
+    type: delegate
+    instructions: |
+      Decompose the implementation into minimal, non-overlapping worker responsibilities. Dispatch independent workers in parallel where safe. Each worker must receive the goal, applicable acceptance criteria, relevant scout findings, an exact responsibility, and a narrow code scope.
+
+      Acceptance criteria:
+      {{artifacts.acceptance_criteria}}
+
+      Codebase context:
+      {{artifacts.codebase_context}}
+    delegate:
+      agents: [worker]
+      minCalls: 1
+      maxCalls: 6
+      parallel: true
+      guidance: |
+        Avoid overlapping files or responsibilities between concurrent workers. If work depends on another change, run it sequentially. Consolidate worker results and verification into implementation_summary.
+      task: |
+        Goal: {{input.goal}}
+
+        Acceptance criteria:
+        {{artifacts.acceptance_criteria}}
+
+        Relevant codebase context:
+        {{artifacts.codebase_context}}
+
+        Complete only the responsibility and code scope assigned by the main agent. Make focused changes and run relevant checks.
+    outputs:
+      - implementation_summary
+    transitions:
+      implemented: qa
+      blocked:
+        target: remediation
+        requireOutputs: false
+      abort:
+        target: canceled
+        requireOutputs: false
+
+  qa:
+    type: delegate
+    instructions: |
+      Ask the QA subagent to independently inspect the changed areas and verify every acceptance criterion. Preserve concrete evidence and distinguish completed criteria from gaps.
+    delegate:
+      agent: qa
+      parallel: false
+      task: |
+        Goal: {{input.goal}}
+
+        Acceptance criteria:
+        {{artifacts.acceptance_criteria}}
+
+        Implementation summary:
+        {{artifacts.implementation_summary}}
+
+        Review the implementation against every criterion. Run safe, focused checks. Return completions, missing requirements, regressions, and evidence. Do not edit files.
+    outputs:
+      - qa_report
+    transitions:
+      passed: completed
+      gaps_found: remediation
+      blocked: remediation
+      abort:
+        target: canceled
+        requireOutputs: false
+
+  remediation:
+    type: main
+    instructions: |
+      Review the QA report against the acceptance criteria. Decide whether focused worker remediation is possible, more user clarification is required, or the workflow should stop. When remediation is possible, prepare precise non-overlapping responsibilities and return to implementation.
+
+      Acceptance criteria:
+      {{artifacts.acceptance_criteria}}
+
+      QA report:
+      {{artifacts.qa_report}}
+    transitions:
+      remediation_planned: implement
+      needs_user_input: remediation
+      abort: canceled
+
+  completed:
+    type: end
+    instructions: |
+      Summarize the completed feature, changed areas, verification performed, and final QA result. Explicitly map the result back to the acceptance criteria.
+
+  canceled:
+    type: end
+    status: canceled
+    instructions: |
+      Summarize why the workflow stopped, what was completed, and the safest next action.

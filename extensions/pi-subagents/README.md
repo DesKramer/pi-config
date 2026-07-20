@@ -7,6 +7,8 @@ A [pi](https://github.com/earendil-works/pi) extension that registers a single `
 | **scout** | read, grep, find, ls | gpt-5.5 (medium) | Fast codebase recon |
 | **researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | gpt-5.5 (high) | Web research |
 | **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent | gpt-5.5 (high) | Code changes (can dispatch scout/researcher to protect its own context) |
+| **acceptance-criteria** | read, grep, find | gpt-5.5 (medium) | Derives testable acceptance criteria and identifies ambiguities |
+| **qa** | read, grep, find, safe_bash | gpt-5.5 (medium) | Runs focused read-only QA and reports evidence |
 
 `worker` is allowlisted to spawn only `scout` and `researcher` (via `subagent_agents` in its frontmatter), so the chain stops at depth 2 — a worker cannot recurse into another worker.
 
@@ -97,11 +99,17 @@ interface AgentConfig {
   subagentAgents?: string[]; // optional spawn-allowlist when `subagent` is in tools
 }
 
+type AgentMetadata = Omit<AgentConfig, "systemPrompt">;
+
 const AGENTS_DIR = path.join(path.dirname(new URL(import.meta.url).pathname), "agents");
 
 function registerMyAgents(): void {
   const subagents = (globalThis as any).__pi_subagents as
-    | { registerAgent: (config: AgentConfig) => void; unregisterAgent: (name: string) => void }
+    | {
+        registerAgent: (config: AgentConfig) => void;
+        unregisterAgent: (name: string) => void;
+        listAgents: () => AgentMetadata[]; // read-only metadata copy
+      }
     | undefined;
   if (!subagents) return; // subagents extension not loaded
 
@@ -135,6 +143,8 @@ function registerMyAgents(): void {
 ```
 
 Call `registerMyAgents()` when your extension activates (e.g. in a command handler). The agents become available to the `subagent` tool immediately.
+
+Use `subagents.listAgents()` when another extension needs read-only metadata for validation or UI. It returns copies of the registered agent configs; do not mutate them expecting registry changes.
 
 ### 3. Adding custom tool support
 
