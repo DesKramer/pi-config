@@ -1,14 +1,18 @@
 # Minimal Subagents
 
-A [pi](https://github.com/earendil-works/pi) extension that registers a single `subagent` tool with three agents:
+A [pi](https://github.com/earendil-works/pi) extension that registers a single `subagent` tool with these agents:
 
 | Agent | Tools | Model | Purpose |
 |-------|-------|-------|---------|
 | **scout** | read, grep, find, ls | gpt-5.5 (medium) | Fast codebase recon |
-| **researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | gpt-5.5 (high) | Web research |
-| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent | gpt-5.5 (high) | Code changes (can dispatch scout/researcher to protect its own context) |
+| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent | gpt-5.5 (high) | General-purpose code changes |
+| **orchestrator** | subagent | gpt-5.5 (medium) | Coordinates autonomous improvement campaigns |
+| **researcher** | read/search tools, subagent | gpt-5.5 (medium) | Investigates opportunities and proposes experiments |
+| **experimenter** | read, write, edit, safe_bash, subagent | gpt-5.5 (medium) | Implements and measures bounded experiments |
+| **evaluator** | read/search tools, safe_bash, subagent | gpt-5.5 (medium) | Independently evaluates candidates |
+| **historian** | read, write, edit | gpt-5.5 (medium) | Maintains concise campaign memory |
 
-`worker` is allowlisted to spawn only `scout` and `researcher` (via `subagent_agents` in its frontmatter), so the chain stops at depth 2 — a worker cannot recurse into another worker.
+Agent recursion is constrained with `subagent_agents` allowlists. The orchestrator can dispatch the four campaign agents; those agents can only dispatch compatible focused helpers, and the historian cannot spawn agents.
 
 ## Dependencies
 

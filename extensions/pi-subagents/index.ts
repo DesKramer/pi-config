@@ -1,7 +1,7 @@
 /**
  * Minimal subagents extension.
  *
- * Registers a single `subagent` tool with three agents: scout, researcher, worker.
+ * Registers a single `subagent` tool backed by agent profiles in `agents/`.
  * Supports single and parallel execution. Output is verbal only (no file handoff).
  */
 import { spawn } from "node:child_process";
