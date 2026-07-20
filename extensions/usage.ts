@@ -49,6 +49,7 @@ type UsageReportData = {
 	duplicateAssistantMessages: number;
 	currentSession: UsageTotals;
 	windows: WindowReport[];
+	totalSpendUsd?: number;
 	subagents?: SubagentReportData;
 	warnings: string[];
 };
@@ -374,6 +375,12 @@ function formatUsd(value: number): string {
 	return `$${value.toFixed(0)}`;
 }
 
+function formatTotalUsd(value: number): string {
+	if (!Number.isFinite(value) || value === 0) return "$0.00";
+	if (Math.abs(value) < 0.01) return `$${value.toFixed(4)}`;
+	return `$${value.toFixed(2)}`;
+}
+
 function padLeft(value: string, width: number): string {
 	return value.length >= width ? value : " ".repeat(width - value.length) + value;
 }
@@ -485,6 +492,8 @@ function formatReport(data: UsageReportData): string {
 	if (data.warnings.length > 0) {
 		lines.push(`Warnings: ${data.warnings.length} (expand for details)`);
 	}
+	const totalSpend = data.totalSpendUsd === undefined ? "Unavailable for this saved report" : formatTotalUsd(data.totalSpendUsd);
+	lines.push("", `Total spend (Pi + subagents, all time): ${totalSpend}`);
 	return lines.join("\n");
 }
 
@@ -569,6 +578,10 @@ async function collectUsage(ctx: any): Promise<UsageReportData> {
 		}
 	}
 
+	let totalSpendUsd = 0;
+	for (const record of byKey.values()) totalSpendUsd += record.usage.cost.total;
+	for (const record of subagentsByKey.values()) totalSpendUsd += record.usage.cost.total;
+
 	return {
 		generatedAt: now,
 		sessionDir,
@@ -579,6 +592,7 @@ async function collectUsage(ctx: any): Promise<UsageReportData> {
 		duplicateAssistantMessages,
 		currentSession,
 		windows,
+		totalSpendUsd,
 		subagents: {
 			currentSession: currentSubagents,
 			windows: subagentWindows,

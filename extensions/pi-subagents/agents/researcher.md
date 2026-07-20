@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Explores the system, investigates possible improvements, and proposes evidence-based experiments.
-tools: read, grep, find, ls, web_search, fetch_content, firecrawl_search, firecrawl_scrape, subagent
+tools: read, grep, find, ls, subagent
 subagent_agents: scout
 model: gpt-5.5
 thinking: medium

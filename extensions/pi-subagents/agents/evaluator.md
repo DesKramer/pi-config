@@ -2,7 +2,7 @@
 name: evaluator
 description: Independently checks whether an experiment genuinely improved the objective without violating constraints.
 tools: read, grep, find, ls, safe_bash, web_search, fetch_content, subagent
-subagent_agents: scout, researcher
+subagent_agents: scout, researcher, web-researcher
 model: gpt-5.5
 thinking: medium
 ---

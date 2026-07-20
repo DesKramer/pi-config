@@ -32,6 +32,16 @@ export interface AgentConfig {
 	subagentAgents?: string[];
 }
 
+export interface AgentMetadata {
+	name: string;
+	description: string;
+	tools: string[];
+	model: string;
+	thinking: string;
+	filePath: string;
+	subagentAgents?: string[];
+}
+
 interface ToolEvent {
 	tool: string;
 	args: string;
@@ -157,9 +167,21 @@ export function unregisterAgent(name: string): void {
 	agents = agents.filter((a) => a.name !== name);
 }
 
+export function listAgents(): AgentMetadata[] {
+	return agents.map((agent) => ({
+		name: agent.name,
+		description: agent.description,
+		tools: [...agent.tools],
+		model: agent.model,
+		thinking: agent.thinking,
+		filePath: agent.filePath,
+		subagentAgents: agent.subagentAgents ? [...agent.subagentAgents] : undefined,
+	}));
+}
+
 // Expose registration functions globally so other extensions loaded via jiti
 // (which creates separate module instances) can access the shared agents array.
-(globalThis as any).__pi_subagents = { registerAgent, unregisterAgent };
+(globalThis as any).__pi_subagents = { registerAgent, unregisterAgent, listAgents };
 
 function loadAgents(): AgentConfig[] {
 	const agents: AgentConfig[] = [];
@@ -892,7 +914,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Run subagents for delegated tasks",
 		promptGuidelines: [
 			"Parallel tool calls are your primary parallelism mechanism — put multiple independent read/fetch/search calls in one function_calls block. Don't use subagents to parallelize simple I/O.",
-			"Use subagent to delegate *reasoning and decisions*: codebase exploration (scout), web research (researcher), or isolated code changes (worker)",
+			"Use subagent to delegate *reasoning and decisions*: codebase exploration (scout), web research (web-researcher), campaign research (researcher), or isolated code changes (worker)",
 			"For multiple independent subagent tasks, emit multiple `subagent` tool calls in the same turn — they run in parallel automatically.",
 			"Subagents have NO context from the current conversation — include ALL necessary context in the task description",
 		],

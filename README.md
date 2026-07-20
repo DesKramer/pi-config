@@ -53,7 +53,8 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `ephemeral.ts` | Ephemeral/session helper extension. |
 | `firecrawl-tools.ts` | Firecrawl search/scrape tools. |
 | `git-status-widget.ts` | Git status widget/status display. |
-| `pi-subagents/` | Subagent tooling with `scout`, `researcher`, and `worker` agents plus `safe-bash`. |
+| `pi-subagents/` | Subagent tooling with `scout`, `researcher`, `worker`, `acceptance-criteria`, and `qa` agents plus `safe-bash`. |
+| `pi-workflow/` | YAML workflow runner with `/workflow` commands, checkpoint tool, and pinned branch-correct state. |
 | `pretty-markdown-code.ts` | Improved markdown/code rendering. |
 | `provider-model-picker.ts` | Provider/model picker helper. |
 | `skill-dollar.ts` | `$` skill invocation/autocomplete helper. |
@@ -86,6 +87,15 @@ Portable settings currently managed in `config/settings.json`:
 | `packages` | `npm:pi-web-access`, `npm:pi-mcp-adapter` |
 
 `./install.sh` merges these settings into `~/.pi/agent/settings.json`. Package entries are additive, and existing machine-local `skills`, `extensions`, `prompts`, and `themes` are preserved unless explicitly added to `config/settings.json`.
+
+### Workflows
+
+A sample `pi-workflow` definition is included at `workflows/feature-implementation.workflow.yaml`. To make it discoverable, copy it to `~/.pi/agent/workflows/` or to a trusted project's `.pi/workflows/` directory:
+
+```bash
+mkdir -p ~/.pi/agent/workflows
+cp workflows/feature-implementation.workflow.yaml ~/.pi/agent/workflows/
+```
 
 ### Prompts
 
