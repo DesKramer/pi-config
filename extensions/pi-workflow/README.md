@@ -11,27 +11,28 @@ The extension discovers workflow files from:
 
 Project workflow names override user workflow names. Project workflows are ignored until Pi considers the project trusted (`ctx.isProjectTrusted()`).
 
-This repository includes a sample workflow at:
+This repository includes two workflows:
 
 ```bash
 workflows/feature-implementation.workflow.yaml
+workflows/bug-fixing.workflow.yaml
 ```
 
-Copy it to a discovered location before running it, for example:
+Copy them to a discovered location before running them, for example:
 
 ```bash
 mkdir -p ~/.pi/agent/workflows
-cp workflows/feature-implementation.workflow.yaml ~/.pi/agent/workflows/
+cp workflows/*.workflow.yaml ~/.pi/agent/workflows/
 ```
 
 or for a trusted project:
 
 ```bash
 mkdir -p .pi/workflows
-cp /path/to/pi-config/workflows/feature-implementation.workflow.yaml .pi/workflows/
+cp /path/to/pi-config/workflows/*.workflow.yaml .pi/workflows/
 ```
 
-The sample uses the `acceptance-criteria` and `qa` subagents added under `extensions/pi-subagents/agents/`.
+`feature-implementation` uses the `acceptance-criteria`, `scout`, `worker`, and `qa` subagents. `bug-fixing` uses `scout` and `worker`. These agents are defined under `extensions/pi-subagents/agents/`.
 
 ## Commands
 

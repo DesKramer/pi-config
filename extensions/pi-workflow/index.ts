@@ -118,12 +118,9 @@ export default function piWorkflowExtension(pi: ExtensionAPI): void {
 		const step = activeSnapshot.currentStep ?? "?";
 		const status = activeSnapshot.status === "running" ? "▶" : "⏸";
 		ctx.ui.setStatus("pi-workflow", ctx.ui.theme.fg(activeSnapshot.status === "running" ? "accent" : "warning", `${status} workflow:${step}`));
-		ctx.ui.setWidget("pi-workflow", [
-			`Workflow: ${activeSnapshot.workflowName}`,
-			`Status: ${activeSnapshot.status}`,
-			`Step: ${step}`,
-			`Goal: ${activeSnapshot.goal}`,
-		]);
+		// Keep workflow state in the compact footer status. Clearing the legacy
+		// widget also removes it immediately when this update is hot-reloaded.
+		ctx.ui.setWidget("pi-workflow", undefined);
 	}
 
 	function persist(events: WorkflowEvent[], snapshot: WorkflowSnapshot): void {

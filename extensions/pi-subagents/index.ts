@@ -10,8 +10,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getMarkdownTheme, parseFrontmatter, truncateHead, withFileMutationQueue, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, type SelectItem, SelectList, Spacer, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { Container, fuzzyFilter, getKeybindings, Input, Markdown, type SelectItem, SelectList, Spacer, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+	canonicalModelRef,
+	clearAgentOverride,
+	clearAllAgentOverrides,
+	DEFAULT_AGENT_MODEL,
+	DEFAULT_AGENT_THINKING,
+	resolveEffectiveAgentSettings,
+	resolveModelRef,
+	setAgentOverride,
+	type AgentEffectiveSettings,
+} from "./settings.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -165,6 +177,7 @@ export function registerAgent(config: AgentConfig): void {
 
 export function unregisterAgent(name: string): void {
 	agents = agents.filter((a) => a.name !== name);
+	clearAgentOverride(name);
 }
 
 export function listAgents(): AgentMetadata[] {
@@ -204,8 +217,8 @@ function loadAgents(): AgentConfig[] {
 			name: frontmatter.name,
 			description: frontmatter.description || "",
 			tools,
-			model: frontmatter.model || "anthropic/claude-sonnet-4-6",
-			thinking: frontmatter.thinking || "medium",
+			model: frontmatter.model || DEFAULT_AGENT_MODEL,
+			thinking: frontmatter.thinking || DEFAULT_AGENT_THINKING,
 			systemPrompt: body,
 			filePath,
 			subagentAgents,
@@ -314,10 +327,18 @@ function truncLine(text: string, maxWidth: number): string {
 
 // ── Subagent Execution ────────────────────────────────────────────────
 
+export type SubagentRunSettings = Pick<AgentEffectiveSettings, "model" | "thinking">;
+
+export function appendSubagentModelThinkingArgs(args: string[], settings: SubagentRunSettings): void {
+	args.push("--model", settings.model);
+	args.push("--thinking", settings.thinking);
+}
+
 async function buildPiArgs(
 	agent: AgentConfig,
 	task: string,
 	cwd: string,
+	settings: SubagentRunSettings,
 ): Promise<{ args: string[]; tempDir: string; childEnv: NodeJS.ProcessEnv | undefined }> {
 	const piBin = resolvePiBinary();
 	const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-sub-"));
@@ -359,8 +380,7 @@ async function buildPiArgs(
 		args.push("--extension", extPath);
 	}
 
-	args.push("--model", agent.model);
-	args.push("--thinking", agent.thinking);
+	appendSubagentModelThinkingArgs(args, settings);
 	args.push("--append-system-prompt", promptPath);
 
 	// Handle long tasks by writing to file
@@ -435,10 +455,11 @@ async function runSubagent(
 	agent: AgentConfig,
 	task: string,
 	cwd: string,
+	settings: SubagentRunSettings,
 	signal: AbortSignal | undefined,
 	onUpdate?: (progress: AgentProgress, usage: AgentResult["usage"]) => void,
 ): Promise<AgentResult> {
-	const { args, tempDir, childEnv } = await buildPiArgs(agent, task, cwd);
+	const { args, tempDir, childEnv } = await buildPiArgs(agent, task, cwd, settings);
 	const command = args[0];
 	const spawnArgs = args.slice(1);
 
@@ -447,7 +468,7 @@ async function runSubagent(
 		task,
 		output: "",
 		exitCode: 0,
-		model: agent.model,
+		model: settings.model,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 		progress: {
 			agent: agent.name,
@@ -672,7 +693,10 @@ function throttle<T extends (...args: any[]) => void>(fn: T, ms: number): T {
 class Semaphore {
 	private inFlight = 0;
 	private readonly waiters: Array<() => void> = [];
-	constructor(private readonly max: number) {}
+	private readonly max: number;
+	constructor(max: number) {
+		this.max = max;
+	}
 	async run<T>(fn: () => Promise<T>): Promise<T> {
 		if (this.inFlight >= this.max) {
 			await new Promise<void>((r) => this.waiters.push(r));
@@ -830,9 +854,228 @@ function renderAgentProgress(
 	return c;
 }
 
+// ── /agents Settings UI ───────────────────────────────────────────────
+
+function formatModelContext(contextWindow: number | undefined): string {
+	if (!contextWindow) return "ctx unknown";
+	return contextWindow >= 1_000_000
+		? `${(contextWindow / 1_000_000).toFixed(1)}M ctx`
+		: `${Math.round(contextWindow / 1000)}k ctx`;
+}
+
+function formatEffectiveSettings(settings: Pick<AgentEffectiveSettings, "model" | "thinking">): string {
+	return `${settings.model} · thinking: ${settings.thinking}`;
+}
+
+function selectListTheme(theme: Theme) {
+	return {
+		selectedPrefix: (text: string) => theme.fg("accent", text),
+		selectedText: (text: string) => theme.fg("accent", text),
+		description: (text: string) => theme.fg("muted", text),
+		scrollInfo: (text: string) => theme.fg("dim", text),
+		noMatch: (text: string) => theme.fg("warning", text),
+	};
+}
+
+async function pickSelectItem(
+	ctx: ExtensionContext,
+	options: AgentSettingsPickOptions,
+): Promise<SelectItem | undefined> {
+	if (options.items.length === 0) return undefined;
+
+	return ctx.ui.custom<SelectItem | undefined>((tui, theme, _keybindings, done) => {
+		const container = new Container();
+		container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+		container.addChild(new Text(theme.fg("accent", theme.bold(options.title)), 1, 0));
+
+		const searchInput = options.fuzzySearch ? new Input() : undefined;
+		if (searchInput) {
+			container.addChild(searchInput);
+			container.addChild(new Spacer(1));
+		}
+		const listContainer = new Container();
+		container.addChild(listContainer);
+		container.addChild(new Text(theme.fg("dim", options.footer ?? "↑↓ navigate · enter choose · esc cancel"), 1, 0));
+		container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+
+		let list: SelectList;
+		const rebuildList = () => {
+			const query = searchInput?.getValue() ?? "";
+			const items = options.fuzzySearch ? filterSelectItems(options.items, query) : options.items;
+			listContainer.clear();
+			list = new SelectList(items, Math.min(Math.max(items.length, 1), 14), selectListTheme(theme));
+			if (!query && options.currentValue) {
+				const selectedIndex = items.findIndex((item) => item.value === options.currentValue);
+				if (selectedIndex >= 0) list.setSelectedIndex(selectedIndex);
+			}
+			list.onSelect = (item) => done(item);
+			list.onCancel = () => done(undefined);
+			listContainer.addChild(list);
+		};
+		rebuildList();
+
+		return {
+			render: (width: number) => container.render(width),
+			invalidate: () => container.invalidate(),
+			handleInput: (data: string) => {
+				const keybindings = getKeybindings();
+				const isListKey = keybindings.matches(data, "tui.select.up")
+					|| keybindings.matches(data, "tui.select.down")
+					|| keybindings.matches(data, "tui.select.confirm")
+					|| keybindings.matches(data, "tui.select.cancel");
+				if (!searchInput || isListKey) {
+					list.handleInput(data);
+				} else {
+					searchInput.handleInput(data);
+					rebuildList();
+				}
+				tui.requestRender();
+			},
+		};
+	}, {
+		overlay: true,
+		overlayOptions: { width: "80%", minWidth: 50, maxHeight: "80%" },
+	});
+}
+
+async function getModelCatalog(ctx: ExtensionContext): Promise<Model<Api>[]> {
+	try {
+		await ctx.modelRegistry.refresh();
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		ctx.ui.notify(`Could not refresh model registry: ${message}`, "warning");
+	}
+	return ctx.modelRegistry.getAll();
+}
+
+export function buildAgentItems(agentList: readonly AgentConfig[], models: readonly Model<Api>[]): SelectItem[] {
+	return agentList.map((agent) => {
+		const effective = resolveEffectiveAgentSettings(agent, models);
+		return {
+			value: agent.name,
+			label: agent.name,
+			description: [
+				agent.description,
+				formatEffectiveSettings(effective),
+				`tools: ${agent.tools.join(", ") || "none"}`,
+			].filter(Boolean).join(" · "),
+		};
+	});
+}
+
+export function buildModelItems(models: readonly Model<Api>[]): SelectItem[] {
+	return models
+		.map((model) => ({
+			value: canonicalModelRef(model),
+			label: canonicalModelRef(model),
+			description: [model.name, formatModelContext(model.contextWindow)].filter(Boolean).join(" · "),
+		}))
+		.sort((a, b) => a.value.localeCompare(b.value));
+}
+
+export function buildThinkingItems(levels: readonly ModelThinkingLevel[]): SelectItem[] {
+	return levels.map((level) => ({
+		value: level,
+		label: level,
+		description: level === "off" ? "Disable reasoning for this agent" : `Use ${level} reasoning for this agent`,
+	}));
+}
+
+export function formatAgentsSummary(agentList: readonly AgentConfig[], models: readonly Model<Api>[]): string {
+	return agentList.map((agent) => {
+		const effective = resolveEffectiveAgentSettings(agent, models);
+		return `${agent.name}: ${formatEffectiveSettings(effective)} (${agent.tools.join(", ") || "no tools"})`;
+	}).join("\n");
+}
+
+export type AgentSettingsPickOptions = {
+	title: string;
+	items: SelectItem[];
+	currentValue?: string;
+	footer?: string;
+	fuzzySearch?: boolean;
+};
+
+export function filterSelectItems(items: readonly SelectItem[], query: string): SelectItem[] {
+	return query.trim()
+		? fuzzyFilter([...items], query, (item) => `${item.value} ${item.label} ${item.description ?? ""}`)
+		: [...items];
+}
+
+export type AgentSettingsPicker = (options: AgentSettingsPickOptions) => Promise<SelectItem | undefined>;
+
+export async function runAgentSettingsWizard(options: {
+	agentList: readonly AgentConfig[];
+	models: readonly Model<Api>[];
+	pick: AgentSettingsPicker;
+	notify?: (message: string, level: "info" | "warning") => void;
+}): Promise<boolean> {
+	const { agentList, models, pick, notify } = options;
+	const agentItem = await pick({
+		title: `Available Agents (${agentList.length})`,
+		items: buildAgentItems(agentList, models),
+		footer: "↑↓ navigate · enter edit model/reasoning · esc close",
+	});
+	if (!agentItem) return false;
+
+	const agent = agentList.find((entry) => entry.name === agentItem.value);
+	if (!agent) return false;
+
+	if (models.length === 0) {
+		notify?.("No models are currently available in the model registry", "warning");
+		return false;
+	}
+
+	const effective = resolveEffectiveAgentSettings(agent, models);
+	const modelItem = await pick({
+		title: `Model for ${agent.name}`,
+		items: buildModelItems(models),
+		currentValue: effective.model,
+		footer: "type to fuzzy search · ↑↓ navigate · enter choose · esc cancel",
+		fuzzySearch: true,
+	});
+	if (!modelItem) return false;
+
+	const selectedModel = resolveModelRef(modelItem.value, models);
+	if (!selectedModel) {
+		notify?.(`Model is no longer available: ${modelItem.value}`, "warning");
+		return false;
+	}
+
+	const supportedThinkingLevels = getSupportedThinkingLevels(selectedModel);
+	const stagedThinking = supportedThinkingLevels.includes(effective.thinking)
+		? effective.thinking
+		: supportedThinkingLevels.includes("off")
+			? "off"
+			: supportedThinkingLevels[0] ?? "off";
+	const thinkingItem = await pick({
+		title: `Reasoning for ${agent.name} (${canonicalModelRef(selectedModel)})`,
+		items: buildThinkingItems(supportedThinkingLevels),
+		currentValue: stagedThinking,
+	});
+	if (!thinkingItem) return false;
+
+	setAgentOverride(agent.name, {
+		model: canonicalModelRef(selectedModel),
+		thinking: thinkingItem.value as ModelThinkingLevel,
+	});
+	notify?.(`Updated ${agent.name}: ${canonicalModelRef(selectedModel)} · thinking: ${thinkingItem.value}`, "info");
+	return true;
+}
+
+async function editAgentSettings(ctx: ExtensionContext, models: readonly Model<Api>[]): Promise<void> {
+	await runAgentSettingsWizard({
+		agentList: agents,
+		models,
+		pick: (options) => pickSelectItem(ctx, options),
+		notify: (message, level) => ctx.ui.notify(message, level),
+	});
+}
+
 // ── Extension ─────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+	clearAllAgentOverrides();
 	const config = loadConfig();
 	const semaphore = new Semaphore(config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY);
 	agents = loadAgents();
@@ -846,63 +1089,20 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("agents", {
-		description: "Preview available subagents",
+		description: "Preview available subagents and adjust session-only subagent models",
 		handler: async (_args, ctx) => {
-			if (ctx.mode !== "tui") {
-				const names = agents.map((agent) => agent.name).join(", ") || "none";
-				ctx.ui.notify(`Available agents: ${names}`, "info");
-				return;
-			}
-
 			if (agents.length === 0) {
 				ctx.ui.notify("No subagents are currently available", "warning");
 				return;
 			}
 
-			const items: SelectItem[] = agents.map((agent) => ({
-				value: agent.name,
-				label: agent.name,
-				description: [
-					agent.description,
-					`${agent.model} · thinking: ${agent.thinking}`,
-					`tools: ${agent.tools.join(", ") || "none"}`,
-				].filter(Boolean).join(" · "),
-			}));
+			const models = await getModelCatalog(ctx);
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify(`Available agents:\n${formatAgentsSummary(agents, models)}`, "info");
+				return;
+			}
 
-			await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-				const container = new Container();
-				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
-				container.addChild(new Text(
-					theme.fg("accent", theme.bold(`Available Agents (${agents.length})`)),
-					1,
-					0,
-				));
-
-				const list = new SelectList(items, Math.min(items.length, 12), {
-					selectedPrefix: (text) => theme.fg("accent", text),
-					selectedText: (text) => theme.fg("accent", text),
-					description: (text) => theme.fg("muted", text),
-					scrollInfo: (text) => theme.fg("dim", text),
-					noMatch: (text) => theme.fg("warning", text),
-				});
-				list.onSelect = () => done(undefined);
-				list.onCancel = () => done(undefined);
-				container.addChild(list);
-				container.addChild(new Text(theme.fg("dim", "↑↓ navigate · type to filter · enter/esc close"), 1, 0));
-				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
-
-				return {
-					render: (width: number) => container.render(width),
-					invalidate: () => container.invalidate(),
-					handleInput: (data: string) => {
-						list.handleInput(data);
-						tui.requestRender();
-					},
-				};
-			}, {
-				overlay: true,
-				overlayOptions: { width: "80%", minWidth: 50, maxHeight: "80%" },
-			});
+			await editAgentSettings(ctx, models);
 		},
 	});
 
@@ -937,21 +1137,21 @@ export default function (pi: ExtensionAPI) {
 				throw new Error(`Unknown agent: ${params.agent}. Available agents: ${available}`);
 			}
 
-			const [provider, modelId] = (agent.model || "").split("/");
-			const contextWindow = provider && modelId ? ctx.modelRegistry.find(provider, modelId)?.contextWindow : undefined;
+			const effective = resolveEffectiveAgentSettings(agent, ctx.modelRegistry.getAll());
+			const contextWindow = effective.resolvedModel?.contextWindow;
 			const liveResult: AgentResult = {
 				agent: params.agent,
 				task: params.task,
 				output: "",
 				exitCode: -1,
-				model: agent.model,
+				model: effective.model,
 				contextWindow,
 				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 				progress: { agent: params.agent, status: "running" as const, task: params.task, recentTools: [], toolCount: 0, tokens: 0, durationMs: 0, lastMessage: "" },
 			};
 
 			const result = await semaphore.run(() =>
-				runSubagent(agent, params.task!, params.cwd ?? cwd, signal, (progress, usage) => {
+				runSubagent(agent, params.task!, params.cwd ?? cwd, effective, signal, (progress, usage) => {
 					liveResult.progress = progress;
 					liveResult.usage = { ...usage };
 					onUpdate?.({

@@ -90,11 +90,18 @@ Portable settings currently managed in `config/settings.json`:
 
 ### Workflows
 
-A sample `pi-workflow` definition is included at `workflows/feature-implementation.workflow.yaml`. To make it discoverable, copy it to `~/.pi/agent/workflows/` or to a trusted project's `.pi/workflows/` directory:
+Two `pi-workflow` definitions are included:
+
+- `workflows/feature-implementation.workflow.yaml`
+- `workflows/bug-fixing.workflow.yaml`
+
+The bug-fixing workflow analyzes the report, scouts the likely source, asks for expected behavior only when missing, scouts related implementation areas, and delegates the fix to a worker.
+
+To make the workflows discoverable, copy them to `~/.pi/agent/workflows/` or to a trusted project's `.pi/workflows/` directory:
 
 ```bash
 mkdir -p ~/.pi/agent/workflows
-cp workflows/feature-implementation.workflow.yaml ~/.pi/agent/workflows/
+cp workflows/*.workflow.yaml ~/.pi/agent/workflows/
 ```
 
 ### Prompts

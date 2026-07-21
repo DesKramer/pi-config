@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { buildContinuationInstructions, buildCurrentStepProtocol } from "../extensions/pi-workflow/instructions.ts";
@@ -105,6 +106,32 @@ test("parser accepts constrained dynamic delegation and terminal instructions", 
 	assert.equal(parsed.diagnostics.filter((d) => d.severity === "error").length, 0, JSON.stringify(parsed.diagnostics, null, 2));
 	assert.equal(parsed.workflow?.steps.qa.delegate?.maxCalls, 3);
 	assert.equal(parsed.workflow?.steps.finished.instructions, "Summarize {{artifacts.qa_report}}.");
+});
+
+test("bug-fixing workflow clarifies expected behavior and requires both scouts before implementation", { skip: !hasYaml }, async () => {
+	const { parseWorkflowYaml } = await importParser();
+	const yaml = readFileSync(new URL("../workflows/bug-fixing.workflow.yaml", import.meta.url), "utf8");
+	const parsed = parseWorkflowYaml(yaml, { validation: { availableAgents: ["scout", "worker"] } });
+	assert.equal(parsed.diagnostics.filter((d) => d.severity === "error").length, 0, JSON.stringify(parsed.diagnostics, null, 2));
+	assert.equal(parsed.workflow?.name, "bug-fixing");
+	assert.ok(parsed.workflow);
+
+	let snapshot = createRunSnapshot({ workflow: parsed.workflow, workflowPath: "bug-fixing.workflow.yaml", workflowSource: "path", workflowHash: parsed.hash ?? "hash", goal: "Saving fails", runId: "bug-run" });
+	snapshot = applyCheckpoint(snapshot, { outcome: "analyzed", artifacts: [{ name: "bug_analysis", content: "Save path fails" }] }).snapshot;
+	snapshot = applyCheckpoint(snapshot, { outcome: "investigated", artifacts: [{ name: "likely_source_context", content: "src/save.ts" }] }).snapshot;
+	assert.equal(snapshot.currentStep, "establish_expected_behavior");
+
+	snapshot = applyCheckpoint(snapshot, { outcome: "needs_clarification" }).snapshot;
+	assert.equal(snapshot.currentStep, "establish_expected_behavior");
+
+	snapshot = applyCheckpoint(snapshot, { outcome: "established", artifacts: [{ name: "expected_behavior", content: "Save succeeds" }] }).snapshot;
+	assert.equal(snapshot.currentStep, "scout_related_areas");
+	snapshot = applyCheckpoint(snapshot, { outcome: "investigated", artifacts: [{ name: "related_code_context", content: "tests/save.test.ts" }] }).snapshot;
+	assert.equal(snapshot.currentStep, "implement");
+
+	const done = applyCheckpoint(snapshot, { outcome: "fixed", artifacts: [{ name: "fix_summary", content: "Fixed and tested" }] });
+	assert.equal(done.snapshot.currentStep, "completed");
+	assert.equal(done.snapshot.status, "completed");
 });
 
 test("template renderer only expands input.goal and artifacts", () => {

@@ -1,0 +1,207 @@
+version: 1
+name: bug-fixing
+description: Fix a reported bug through analysis, targeted and broader codebase investigation, expected-behavior clarification, and focused implementation.
+artifacts:
+  bug_analysis:
+    type: text
+    description: Main-agent analysis of the reported behavior, evidence, affected functionality, and useful investigation leads.
+  likely_source_context:
+    type: text
+    description: Scout findings for the likely source, including relevant files, symbols, tests, data flow, and constraints.
+  expected_behavior:
+    type: text
+    description: Explicit, testable expected behavior taken from the report or clarified with the user.
+  related_code_context:
+    type: text
+    description: Additional scout findings covering other relevant code paths, implementation candidates, tests, edge cases, and regression risks.
+  fix_summary:
+    type: text
+    description: Worker's implementation summary, changed files, rationale, tests, and verification results.
+start: analyze
+steps:
+  analyze:
+    type: main
+    instructions: |
+      Analyze the bug or issue described in {{input.goal}} before inspecting or editing code.
+
+      Capture the reported actual behavior, reproduction clues, errors or stack traces, affected functionality, environment details, and likely investigation leads. Note whether the user has already described the expected behavior. The report may be concrete or loosely described; preserve uncertainty instead of inventing details.
+
+      Produce bug_analysis, then continue to targeted investigation. Do not ask about expected behavior yet and do not edit files.
+    outputs:
+      - bug_analysis
+    transitions:
+      analyzed: scout_likely_source
+      abort:
+        target: canceled
+        requireOutputs: false
+
+  scout_likely_source:
+    type: delegate
+    instructions: |
+      Send a scout to investigate the most likely source of the issue using the original report and analysis.
+
+      Bug analysis:
+      {{artifacts.bug_analysis}}
+
+      The scout should trace the relevant functionality even when the report has no precise stack trace. Consolidate its concrete findings into likely_source_context. Do not edit files.
+    delegate:
+      agent: scout
+      parallel: false
+      guidance: |
+        Give the scout the full report and analysis. Ask it to prioritize the likely root-cause area and return concrete paths, symbols, data flow, existing tests, and constraints.
+      task: |
+        Bug report:
+        {{input.goal}}
+
+        Main-agent analysis:
+        {{artifacts.bug_analysis}}
+
+        Investigate the likely source of this issue. Trace the affected functionality and return relevant files and symbols, likely failure points, existing tests, and implementation constraints. Do not edit files.
+    outputs:
+      - likely_source_context
+    transitions:
+      investigated: establish_expected_behavior
+      inconclusive: establish_expected_behavior
+      abort:
+        target: canceled
+        requireOutputs: false
+
+  establish_expected_behavior:
+    type: main
+    instructions: |
+      Establish explicit, testable expected behavior before implementation.
+
+      Original report:
+      {{input.goal}}
+
+      Bug analysis:
+      {{artifacts.bug_analysis}}
+
+      Likely source context:
+      {{artifacts.likely_source_context}}
+
+      If the user already supplied the expected behavior in the report or conversation, capture it as expected_behavior without asking again and continue.
+
+      If expected behavior is missing or materially ambiguous, ask the user one focused question about what the correct behavior should be. Do not infer product intent. Checkpoint with needs_clarification and no artifacts; remain in this step until the user's answer makes the behavior testable.
+    outputs:
+      - expected_behavior
+    transitions:
+      established: scout_related_areas
+      needs_clarification:
+        target: establish_expected_behavior
+        requireOutputs: false
+      abort:
+        target: canceled
+        requireOutputs: false
+
+  scout_related_areas:
+    type: delegate
+    instructions: |
+      Send another scout to look beyond the first likely source using the now-explicit expected behavior. Investigate other relevant implementation candidates, connected code paths, tests, edge cases, and regression risks that the fix may need to account for.
+
+      Expected behavior:
+      {{artifacts.expected_behavior}}
+
+      Likely source context:
+      {{artifacts.likely_source_context}}
+
+      Consolidate the additional findings into related_code_context. Do not edit files.
+    delegate:
+      agent: scout
+      parallel: false
+      guidance: |
+        This is a second, broader read-only investigation. Give the scout all prior artifacts and ask it to validate or challenge the initial candidate while identifying connected behavior and regression coverage.
+      task: |
+        Bug report:
+        {{input.goal}}
+
+        Bug analysis:
+        {{artifacts.bug_analysis}}
+
+        Initial likely-source findings:
+        {{artifacts.likely_source_context}}
+
+        Expected behavior:
+        {{artifacts.expected_behavior}}
+
+        Investigate other code areas that may be relevant to implementing this fix. Validate the likely implementation location, identify alternative or connected candidates, edge cases, tests, integration boundaries, and regression risks. Return concrete paths and symbols. Do not edit files.
+    outputs:
+      - related_code_context
+    transitions:
+      investigated: implement
+      insufficient_context:
+        target: scout_related_areas
+        requireOutputs: false
+      abort:
+        target: canceled
+        requireOutputs: false
+
+  implement:
+    type: delegate
+    instructions: |
+      Send all gathered inputs to a worker and ask it to implement a focused bug fix. The worker has isolated context, so include the original report and every artifact.
+
+      Bug analysis:
+      {{artifacts.bug_analysis}}
+
+      Likely source context:
+      {{artifacts.likely_source_context}}
+
+      Expected behavior:
+      {{artifacts.expected_behavior}}
+
+      Related code context:
+      {{artifacts.related_code_context}}
+
+      Consolidate the worker's changed files, rationale, tests, and verification into fix_summary.
+    delegate:
+      agent: worker
+      parallel: false
+      guidance: |
+        The worker may edit files and run checks. Require a minimal root-cause fix, regression coverage where practical, and verification against the expected behavior. It must report blockers rather than guessing.
+      task: |
+        Implement the bug fix described below.
+
+        Original bug report:
+        {{input.goal}}
+
+        Main-agent analysis:
+        {{artifacts.bug_analysis}}
+
+        Initial likely-source findings:
+        {{artifacts.likely_source_context}}
+
+        Expected behavior:
+        {{artifacts.expected_behavior}}
+
+        Additional related-area findings:
+        {{artifacts.related_code_context}}
+
+        Read the relevant files before editing. Implement the smallest root-cause fix that satisfies the expected behavior and respects the discovered constraints. Add or update regression tests where practical, run relevant checks, and report changed files, rationale, and verification.
+    outputs:
+      - fix_summary
+    transitions:
+      fixed: completed
+      blocked:
+        target: canceled
+        requireOutputs: false
+      abort:
+        target: canceled
+        requireOutputs: false
+
+  completed:
+    type: end
+    instructions: |
+      Summarize the completed fix, changed areas, regression coverage, and verification. Explain how the result matches the expected behavior.
+
+      Expected behavior:
+      {{artifacts.expected_behavior}}
+
+      Fix summary:
+      {{artifacts.fix_summary}}
+
+  canceled:
+    type: end
+    status: canceled
+    instructions: |
+      Summarize why the bug-fixing workflow stopped, what was learned, and the safest next action.

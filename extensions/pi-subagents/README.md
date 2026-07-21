@@ -23,7 +23,7 @@ Agent recursion is constrained with `subagent_agents` allowlists. The orchestrat
 
 ## Usage
 
-Run `/agents` in the TUI to open a searchable preview of the currently registered agents, including each agent's description, model, thinking level, and tools.
+Run `/agents` in the TUI to open a list of registered agents, including each agent's description, effective model, thinking level, and tools. Select an agent, then type in the model picker to fuzzy-search Pi's configured model registry by provider, model ID, or display name. After choosing a model, select a reasoning level supported by that model. Changes apply to subsequent runs in the current Pi session only; canceling any picker leaves the agent unchanged, and restarting or reloading Pi restores the agent definitions.
 
 One tool call = one subagent:
 ```json
