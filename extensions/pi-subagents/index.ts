@@ -136,11 +136,13 @@ const BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "grep", "find", 
 const EXT_BASE = path.dirname(EXT_DIR);
 const WEB_ACCESS_EXT = path.join(process.env.HOME || "~", ".pi", "agent", "npm", "node_modules", "pi-web-access", "index.ts");
 const FIRECRAWL_EXT = path.join(EXT_BASE, "firecrawl-tools.ts");
+const MEM0_EXT = path.join(EXT_BASE, "mem0.ts");
 const CUSTOM_TOOL_EXTENSIONS: Record<string, string> = {
 	web_search: WEB_ACCESS_EXT,
 	fetch_content: WEB_ACCESS_EXT,
 	firecrawl_search: FIRECRAWL_EXT,
 	firecrawl_scrape: FIRECRAWL_EXT,
+	mem0_memory: MEM0_EXT,
 	web_fetch: path.join(EXT_BASE, "web-fetch", "index.ts"),
 	safe_bash: path.join(TOOLS_DIR, "safe-bash.ts"),
 	video_extract: path.join(EXT_BASE, "video-extract", "index.ts"),

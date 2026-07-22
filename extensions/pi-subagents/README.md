@@ -4,14 +4,14 @@ A [pi](https://github.com/earendil-works/pi) extension that registers a single `
 
 | Agent | Tools | Model | Purpose |
 |-------|-------|-------|---------|
-| **scout** | read, grep, find, ls | gpt-5.5 (medium) | Fast codebase recon |
+| **scout** | read, grep, find, ls, mem0_memory | gpt-5.5 (medium) | Fast codebase recon with explicit local-memory search/add |
 | **orchestrator** | subagent | gpt-5.5 (medium) | Coordinates autonomous improvement campaigns |
 | **researcher** | read/search tools, subagent | gpt-5.5 (medium) | Investigates opportunities and proposes experiments |
 | **experimenter** | read, write, edit, safe_bash, subagent | gpt-5.5 (medium) | Implements and measures bounded experiments |
 | **evaluator** | read/search tools, safe_bash, subagent | gpt-5.5 (medium) | Independently evaluates candidates |
 | **historian** | read, write, edit | gpt-5.5 (medium) | Maintains concise campaign memory |
 | **web-researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | gpt-5.5 (high) | Web research |
-| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent | gpt-5.5 (high) | Code changes (can dispatch scout/web-researcher to protect its own context) |
+| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory | gpt-5.5 (high) | Code changes with explicit local-memory search/add (can dispatch scout/web-researcher to protect its own context) |
 | **acceptance-criteria** | read, grep, find | gpt-5.5 (medium) | Derives testable acceptance criteria and identifies ambiguities |
 | **qa** | read, grep, find, safe_bash | gpt-5.5 (medium) | Runs focused read-only QA and reports evidence |
 
@@ -19,7 +19,7 @@ Agent recursion is constrained with `subagent_agents` allowlists. The orchestrat
 
 ## Dependencies
 
-`safe_bash` ships in this repo (`tools/safe-bash.ts`). This local install maps `web_search` and `fetch_content` to the installed `pi-web-access` package under `~/.pi/agent/npm/node_modules/pi-web-access/index.ts`, and maps `firecrawl_search`/`firecrawl_scrape` to `~/.pi/agent/extensions/firecrawl-tools.ts`.
+`safe_bash` ships in this repo (`tools/safe-bash.ts`). This local install maps `web_search` and `fetch_content` to the installed `pi-web-access` package under `~/.pi/agent/npm/node_modules/pi-web-access/index.ts`, `firecrawl_search`/`firecrawl_scrape` to `firecrawl-tools.ts`, and `mem0_memory` to `mem0.ts`. The Mem0 tool is available only to worker and scout; it still searches/adds only on explicit user requests.
 
 ## Usage
 
