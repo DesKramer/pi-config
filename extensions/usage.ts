@@ -8,6 +8,12 @@ import { homedir } from "node:os";
 const ENTRY_TYPE = "pi-usage-report";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+export type SessionUsageTotal = {
+	mainUsd: number;
+	subagentUsd: number;
+	totalUsd: number;
+};
+
 type UsageTotals = {
 	calls: number;
 	input: number;
@@ -351,6 +357,20 @@ function subagentRecordsFromEntries(entries: unknown[], sessionFile?: string): {
 	return { records, missingUsage };
 }
 
+export function collectSessionUsage(entries: readonly unknown[]): SessionUsageTotal {
+	let mainUsd = 0;
+	let subagentUsd = 0;
+
+	for (const entry of entries) {
+		const main = recordFromEntry(entry);
+		if (main) mainUsd += main.usage.cost.total;
+		const subagents = subagentRecordsFromEntry(entry);
+		for (const record of subagents.records) subagentUsd += record.usage.cost.total;
+	}
+
+	return { mainUsd, subagentUsd, totalUsd: mainUsd + subagentUsd };
+}
+
 function defaultSessionsRoot(): string {
 	if (process.env.PI_CODING_AGENT_SESSION_DIR) return resolve(process.env.PI_CODING_AGENT_SESSION_DIR);
 	const agentDir = process.env.PI_CODING_AGENT_DIR
@@ -609,6 +629,10 @@ export default function usageCommand(pi: ExtensionAPI): void {
 	pi.registerEntryRenderer<UsageReportData>(ENTRY_TYPE, (entry, { expanded }, theme) => {
 		const data = entry.data;
 		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		if (!data) {
+			box.addChild(new Text(theme.fg("warning", "Usage report data is unavailable."), 0, 0));
+			return box;
+		}
 		box.addChild(new Text(theme.fg("accent", formatReport(data)), 0, 0));
 
 		if (expanded) {
@@ -622,6 +646,19 @@ export default function usageCommand(pi: ExtensionAPI): void {
 		}
 
 		return box;
+	});
+
+	pi.registerCommand("usage-session", {
+		description: "Show total USD cost for the active session branch, including all subagents",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+			try {
+				const total = collectSessionUsage(ctx.sessionManager.getBranch()).totalUsd;
+				ctx.ui.notify(`Session total: ${formatTotalUsd(total)}`, "info");
+			} catch (error) {
+				ctx.ui.notify(`Failed to calculate session usage: ${errorMessage(error)}`, "error");
+			}
+		},
 	});
 
 	pi.registerCommand("usage", {
