@@ -68,6 +68,7 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `pi-workflow/` | YAML workflow runner with `/workflow` commands, checkpoint tool, and pinned branch-correct state. |
 | `pretty-markdown-code.ts` | Improved markdown/code rendering. |
 | `provider-model-picker.ts` | Provider/model picker helper. |
+| `remote-pi/` | Attached-session Remote Pi bridge over strict LF JSONL Unix socket with fail-open reconnect, snapshots, events, commands, and explicit attached-only capabilities. |
 | `skill-dollar.ts` | `$` skill invocation/autocomplete helper. |
 | `tps-status.ts` | Tokens-per-second/status display. |
 | `usage.ts` | Usage/cost/session utility display. |
