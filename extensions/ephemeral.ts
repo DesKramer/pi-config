@@ -281,7 +281,6 @@ function discoverMcps(cwd: string): ResourceItem[] {
 	const items = new Map<string, ResourceItem>();
 	const sources = [
 		{ path: join(homedir(), ".config", "mcp", "mcp.json"), label: "standard MCP" },
-		{ path: join(homedir(), ".cosine", "mcp.json"), label: "Cosine MCP" },
 		{ path: join(getAgentDir(), "mcp.json"), label: "Pi MCP" },
 		{ path: join(cwd, ".mcp.json"), label: "project MCP" },
 		{ path: join(cwd, CONFIG_DIR_NAME, "mcp.json"), label: "project Pi MCP" },
