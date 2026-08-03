@@ -3,7 +3,7 @@ name: researcher
 description: Explores the system, investigates possible improvements, and proposes evidence-based experiments.
 tools: read, grep, find, ls, subagent
 subagent_agents: scout
-model: gpt-5.5
+model: openai-codex/gpt-5.6-luna
 thinking: medium
 ---
 

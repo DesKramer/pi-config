@@ -3,8 +3,8 @@ name: worker
 description: General-purpose worker — reads, writes, and edits code
 tools: read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory
 subagent_agents: scout, web-researcher
-model: gpt-5.5
-thinking: high
+model: openai-codex/gpt-5.6-luna
+thinking: medium
 ---
 
 You are a worker agent. You operate in an isolated context — you have no knowledge of any prior conversation.

@@ -3,7 +3,7 @@ name: orchestrator
 description: Understands the user's goal, assembles the right agents, delegates work, and decides what should happen next.
 tools: subagent
 subagent_agents: researcher, experimenter, evaluator, historian
-model: gpt-5.5
+model: openai-codex/gpt-5.6-luna
 thinking: medium
 ---
 

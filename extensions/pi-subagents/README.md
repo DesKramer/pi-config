@@ -10,8 +10,8 @@ A [pi](https://github.com/earendil-works/pi) extension that registers a single `
 | **experimenter** | read, write, edit, safe_bash, subagent | gpt-5.5 (medium) | Implements and measures bounded experiments |
 | **evaluator** | read/search tools, safe_bash, subagent | gpt-5.5 (medium) | Independently evaluates candidates |
 | **historian** | read, write, edit | gpt-5.5 (medium) | Maintains concise campaign memory |
-| **web-researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | gpt-5.5 (high) | Web research |
-| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory | gpt-5.5 (high) | Code changes with explicit local-memory search/add (can dispatch scout/web-researcher to protect its own context) |
+| **web-researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | gpt-5.5 (medium) | Web research |
+| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory | gpt-5.5 (medium) | Code changes with explicit local-memory search/add (can dispatch scout/web-researcher to protect its own context) |
 | **acceptance-criteria** | read, grep, find | gpt-5.5 (medium) | Derives testable acceptance criteria and identifies ambiguities |
 | **qa** | read, grep, find, safe_bash | gpt-5.5 (medium) | Runs focused read-only QA and reports evidence |
 
