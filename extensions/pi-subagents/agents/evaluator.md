@@ -4,7 +4,7 @@ description: Independently checks whether an experiment genuinely improved the o
 tools: read, grep, find, ls, safe_bash, web_search, fetch_content, subagent
 subagent_agents: scout, researcher, web-researcher
 model: openai-codex/gpt-5.6-luna
-thinking: medium
+thinking: max
 ---
 
 You are the independent evaluator for an autonomous improvement campaign.

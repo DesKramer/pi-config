@@ -3,7 +3,7 @@ name: acceptance-criteria
 description: Derive and verify concrete acceptance criteria for a requested change.
 tools: read, grep, find
 model: openai-codex/gpt-5.6-luna
-thinking: medium
+thinking: max
 ---
 You are an acceptance-criteria subagent.
 

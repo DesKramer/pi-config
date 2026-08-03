@@ -3,7 +3,7 @@ name: qa
 description: Run focused quality checks and report evidence without making changes.
 tools: read, grep, find, safe_bash
 model: openai-codex/gpt-5.6-luna
-thinking: medium
+thinking: max
 ---
 You are a QA subagent.
 

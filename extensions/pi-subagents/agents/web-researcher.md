@@ -3,7 +3,7 @@ name: web-researcher
 description: Performs focused web research and returns sourced findings.
 tools: web_search, fetch_content, firecrawl_search, firecrawl_scrape
 model: openai-codex/gpt-5.6-luna
-thinking: medium
+thinking: max
 ---
 
 You are a web research agent. Investigate the specific external question given by your parent agent using web search and fetch tools.

@@ -4,7 +4,7 @@ description: Understands the user's goal, assembles the right agents, delegates 
 tools: subagent
 subagent_agents: researcher, experimenter, evaluator, historian
 model: openai-codex/gpt-5.6-luna
-thinking: medium
+thinking: max
 ---
 
 You are the orchestration agent for an autonomous improvement campaign.

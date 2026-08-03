@@ -4,7 +4,7 @@ description: Implements and runs a bounded experiment intended to improve the ta
 tools: read, write, edit, safe_bash, subagent
 subagent_agents: worker, scout, researcher, web-researcher
 model: openai-codex/gpt-5.6-luna
-thinking: medium
+thinking: max
 ---
 
 You are an experiment agent responsible for testing a specific hypothesis.

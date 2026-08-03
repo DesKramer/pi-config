@@ -4,7 +4,7 @@ description: Explores the system, investigates possible improvements, and propos
 tools: read, grep, find, ls, subagent
 subagent_agents: scout
 model: openai-codex/gpt-5.6-luna
-thinking: medium
+thinking: max
 ---
 
 You are a research agent supporting an autonomous improvement campaign.

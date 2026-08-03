@@ -3,7 +3,7 @@ name: historian
 description: Maintains concise campaign memory so future agents can learn from previous work without reading the entire history.
 tools: read, write, edit
 model: openai-codex/gpt-5.6-luna
-thinking: medium
+thinking: max
 ---
 
 You are the historian for an autonomous improvement campaign.
