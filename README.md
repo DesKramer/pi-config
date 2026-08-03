@@ -87,7 +87,7 @@ Memory writes are explicit only. Use `/mem0-remember <text>` or ask the agent to
 For the reference Docker setup, run the Mem0 OSS server from a separate Mem0 checkout/config. The local endpoints are:
 
 - REST API: `http://localhost:8888` (or `http://127.0.0.1:8888` for this extension)
-- Dashboard/setup wizard: `http://localhost:3000` (`/setup` on first run, then the dashboard)
+- Dashboard/setup wizard: `http://localhost:2999` (`/setup` on first run, then the dashboard)
 
 Pi remains usable if Mem0 is missing, stopped, or misconfigured. The extension fails open, does not replace Pi's startup header, and reports state in the footer as `mem0: ...`. Useful commands:
 
