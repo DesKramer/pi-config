@@ -12,6 +12,7 @@
   "include": [
     "extensions/pi-workflow/**/*.ts",
     "extensions/pi-subagents/index.ts",
+    "extensions/orchestrator/**/*.ts",
     "extensions/remote-pi/**/*.ts",
     "tests/**/*.ts"
   ]
