@@ -3,7 +3,7 @@ name: evaluator
 description: Independently checks whether an experiment genuinely improved the objective without violating constraints.
 tools: read, grep, find, ls, safe_bash, web_search, fetch_content, subagent
 subagent_agents: scout, researcher, web-researcher
-model: moonshotai/kimi-k3
+model: openai-codex/gpt-5.6-sol
 thinking: max
 ---
 

@@ -2,7 +2,7 @@
 name: scout
 description: Fast codebase recon — explores files, finds patterns, maps architecture
 tools: read, grep, find, ls, mem0_memory
-model: moonshotai/kimi-k3
+model: openai-codex/gpt-5.6-sol
 thinking: max
 ---
 

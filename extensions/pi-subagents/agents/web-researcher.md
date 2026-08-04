@@ -2,7 +2,7 @@
 name: web-researcher
 description: Performs focused web research and returns sourced findings.
 tools: web_search, fetch_content, firecrawl_search, firecrawl_scrape
-model: moonshotai/kimi-k3
+model: openai-codex/gpt-5.6-sol
 thinking: max
 ---
 
