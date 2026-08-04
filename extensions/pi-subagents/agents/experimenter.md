@@ -3,7 +3,7 @@ name: experimenter
 description: Implements and runs a bounded experiment intended to improve the target behavior.
 tools: read, write, edit, safe_bash, subagent
 subagent_agents: worker, scout, researcher, web-researcher
-model: openai-codex/gpt-5.6-luna
+model: moonshotai/kimi-k3
 thinking: max
 ---
 

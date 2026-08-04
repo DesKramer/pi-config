@@ -59,6 +59,33 @@ function formatCwd(cwd: string, home: string | undefined): string {
 	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
 }
 
+function subagentResultCost(result: unknown): number {
+	if (!result || typeof result !== "object") return 0;
+	const obj = result as { usage?: { cost?: unknown }; progress?: { recentTools?: unknown } };
+	let cost = 0;
+	const usageCost = obj.usage?.cost;
+	if (typeof usageCost === "number" && Number.isFinite(usageCost)) cost += usageCost;
+	const recentTools = obj.progress?.recentTools;
+	if (Array.isArray(recentTools)) {
+		for (const tool of recentTools) {
+			const children = (tool as { children?: unknown })?.children;
+			if (Array.isArray(children)) {
+				for (const child of children) cost += subagentResultCost(child);
+			}
+		}
+	}
+	return cost;
+}
+
+function subagentEntryCost(entry: any): number {
+	if (entry?.type !== "message" || entry.message?.role !== "toolResult" || entry.message?.toolName !== "subagent") return 0;
+	const results = (entry.message.details as { results?: unknown } | undefined)?.results;
+	if (!Array.isArray(results)) return 0;
+	let cost = 0;
+	for (const result of results) cost += subagentResultCost(result);
+	return cost;
+}
+
 function sanitizeStatusText(text: string): string {
 	return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
 }
@@ -87,6 +114,8 @@ function createFooter(getCtx: () => any, pi: ExtensionAPI, getTpsDisplay: () => 
 					latestCacheHitRate = latestPromptTokens > 0
 						? (entry.message.usage.cacheRead / latestPromptTokens) * 100
 						: undefined;
+				} else {
+					totalCost += subagentEntryCost(entry);
 				}
 			}
 
