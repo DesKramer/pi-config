@@ -2,8 +2,8 @@
 name: orchestrator
 description: Understands the user's goal, assembles the right agents, delegates work, and decides what should happen next.
 tools: subagent
-subagent_agents: researcher, experimenter, evaluator, historian
-model: openai-codex/gpt-5.6-sol
+subagent_agents: researcher, experimenter, evaluator
+model: meta/muse-spark-1.2
 thinking: max
 ---
 
