@@ -170,6 +170,29 @@ const SUBAGENT_ALLOWLIST: string[] | undefined = (() => {
 	return list.length > 0 ? list : undefined;
 })();
 
+let showFullSubagentErrors = false;
+const subagentErrorInvalidateCallbacks = new Set<() => void>();
+export function getShowFullSubagentErrors(): boolean {
+	return showFullSubagentErrors;
+}
+export function setShowFullSubagentErrors(value: boolean): void {
+	showFullSubagentErrors = value;
+	for (const cb of subagentErrorInvalidateCallbacks) {
+		try {
+			cb();
+		} catch {}
+	}
+}
+export function toggleShowFullSubagentErrors(): boolean {
+	showFullSubagentErrors = !showFullSubagentErrors;
+	for (const cb of subagentErrorInvalidateCallbacks) {
+		try {
+			cb();
+		} catch {}
+	}
+	return showFullSubagentErrors;
+}
+
 export function registerAgent(config: AgentConfig): void {
 	if (SUBAGENT_ALLOWLIST && !SUBAGENT_ALLOWLIST.includes(config.name)) return;
 	if (agents.find((a) => a.name === config.name)) {
@@ -876,9 +899,19 @@ function renderAgentProgress(
 		addLine(usageParts.join(" "));
 	}
 
-	// Error
+	// Error — toggleable via Ctrl+E (showFullSubagentErrors)
 	if (prog.error) {
-		addLine(theme.fg("error", `Error: ${prog.error}`));
+		if (showFullSubagentErrors) {
+			const errorLines = prog.error.split("\n");
+			for (let i = 0; i < errorLines.length; i++) {
+				const prefix = i === 0 ? "Error: " : "  ";
+				c.addChild(new Text(indent + theme.fg("error", prefix + errorLines[i]), 0, 0));
+			}
+			c.addChild(new Text(indent + theme.fg("dim", "(Ctrl+E to collapse)"), 0, 0));
+		} else {
+			const hint = theme.fg("dim", " (Ctrl+E to expand)");
+			addLine(theme.fg("error", `Error: ${prog.error}`) + hint);
+		}
 	}
 
 	return c;
@@ -979,18 +1012,21 @@ async function getModelCatalog(ctx: ExtensionContext): Promise<Model<Api>[]> {
 }
 
 export function buildAgentItems(agentList: readonly AgentConfig[], models: readonly Model<Api>[]): SelectItem[] {
-	return agentList.map((agent) => {
+	if (agentList.length === 0) return [];
+	const agentItems: SelectItem[] = agentList.map((agent) => {
 		const effective = resolveEffectiveAgentSettings(agent, models);
 		return {
 			value: agent.name,
 			label: agent.name,
-			description: [
-				agent.description,
-				formatEffectiveSettings(effective),
-				`tools: ${agent.tools.join(", ") || "none"}`,
-			].filter(Boolean).join(" · "),
+			description: formatEffectiveSettings(effective),
 		};
 	});
+	const allItem: SelectItem = {
+		value: "__all__",
+		label: "all",
+		description: `Apply to all ${agentList.length} agents`,
+	};
+	return [allItem, ...agentItems];
 }
 
 export function extractInferenceProvider(name: string): string | undefined {
@@ -1066,6 +1102,49 @@ export async function runAgentSettingsWizard(options: {
 	});
 	if (!agentItem) return false;
 
+	if (agentItem.value === "__all__") {
+		if (models.length === 0) {
+			notify?.("No models are currently available in the model registry", "warning");
+			return false;
+		}
+		const modelItem = await pick({
+			title: "Model for all agents",
+			items: buildModelItems(models),
+			currentValue: undefined,
+			footer: "type to fuzzy search · ↑↓ navigate · enter choose · esc cancel",
+			fuzzySearch: true,
+		});
+		if (!modelItem) return false;
+
+		const selectedModel = resolveModelRef(modelItem.value, models);
+		if (!selectedModel) {
+			notify?.(`Model is no longer available: ${modelItem.value}`, "warning");
+			return false;
+		}
+
+		const supportedThinkingLevels = getSupportedThinkingLevels(selectedModel);
+		const stagedThinking: ModelThinkingLevel = supportedThinkingLevels.includes("medium" as ModelThinkingLevel)
+			? "medium" as ModelThinkingLevel
+			: supportedThinkingLevels.includes("off")
+				? "off"
+				: (supportedThinkingLevels[0] ?? "off");
+		const thinkingItem = await pick({
+			title: `Reasoning for all agents (${canonicalModelRef(selectedModel)})`,
+			items: buildThinkingItems(supportedThinkingLevels),
+			currentValue: stagedThinking,
+		});
+		if (!thinkingItem) return false;
+
+		for (const agent of agentList) {
+			setAgentOverride(agent.name, {
+				model: canonicalModelRef(selectedModel),
+				thinking: thinkingItem.value as ModelThinkingLevel,
+			});
+		}
+		notify?.(`Updated all ${agentList.length} agents: ${canonicalModelRef(selectedModel)} · thinking: ${thinkingItem.value}`, "info");
+		return true;
+	}
+
 	const agent = agentList.find((entry) => entry.name === agentItem.value);
 	if (!agent) return false;
 
@@ -1124,6 +1203,13 @@ async function editAgentSettings(ctx: ExtensionContext, models: readonly Model<A
 
 export default function (pi: ExtensionAPI) {
 	clearAllAgentOverrides();
+	(pi as unknown as { registerShortcut?: ExtensionAPI["registerShortcut"] }).registerShortcut?.("ctrl+e", {
+		description: "Toggle subagent error details",
+		handler: (ctx) => {
+			const nowExpanded = toggleShowFullSubagentErrors();
+			ctx.ui.notify(nowExpanded ? "Subagent errors: expanded" : "Subagent errors: collapsed", "info");
+		},
+	});
 	const config = loadConfig();
 	const semaphore = new Semaphore(config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY);
 	agents = loadAgents();
@@ -1267,6 +1353,10 @@ export default function (pi: ExtensionAPI) {
 		// ── Render: result ──
 		renderResult(result, options, theme, context) {
 			const details = result.details as Details | undefined;
+			// Register invalidate for Ctrl+E toggle rerender
+			if (context?.invalidate) {
+				subagentErrorInvalidateCallbacks.add(context.invalidate);
+			}
 			if (!details?.results?.length) {
 				const t = result.content[0];
 				const text = t?.type === "text" ? t.text : "(no output)";

@@ -1,6 +1,6 @@
 import { getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 
-export const DEFAULT_AGENT_MODEL = "anthropic/claude-sonnet-4-6";
+export const DEFAULT_AGENT_MODEL = "cosine/glm-5.2";
 export const DEFAULT_AGENT_THINKING: ModelThinkingLevel = "medium";
 
 export const ALL_MODEL_THINKING_LEVELS: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];

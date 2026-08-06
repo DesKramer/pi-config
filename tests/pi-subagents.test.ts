@@ -158,11 +158,14 @@ test("option builders expose effective agent rows, every registry model, and sup
 	setAgentOverride("worker", { model: "openai/plain", thinking: "off" });
 
 	const agentItems = buildAgentItems([worker], models);
-	assert.equal(agentItems.length, 1);
-	assert.equal(agentItems[0].value, "worker");
-	assert.match(agentItems[0].description ?? "", /does focused work/);
-	assert.match(agentItems[0].description ?? "", /openai\/plain · thinking: off/);
-	assert.match(agentItems[0].description ?? "", /tools: read, edit/);
+	assert.equal(agentItems.length, 2);
+	assert.equal(agentItems[0].value, "__all__");
+	assert.equal(agentItems[0].label, "all");
+	assert.match(agentItems[0].description ?? "", /Apply to all 1 agents/);
+	assert.equal(agentItems[1].value, "worker");
+	assert.equal(agentItems[1].description, "openai/plain · thinking: off");
+	assert.doesNotMatch(agentItems[1].description ?? "", /does focused work/);
+	assert.doesNotMatch(agentItems[1].description ?? "", /tools:/);
 
 	assert.deepEqual(
 		buildModelItems(models).map((item) => item.value),
