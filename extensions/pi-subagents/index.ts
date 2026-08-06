@@ -100,6 +100,7 @@ interface AgentResult {
 	exitCode: number;
 	progress: AgentProgress;
 	model?: string;
+	modelName?: string;
 	contextWindow?: number;
 	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number };
 }
@@ -264,6 +265,28 @@ function formatContextUsage(tokens: number, contextWindow: number | undefined): 
 	return `${pct.toFixed(1)}%/${maxStr}`;
 }
 
+function formatTpsValue(outputTokens: number, durationMs: number): string | undefined {
+	if (!outputTokens || !durationMs || durationMs < 1) return undefined;
+	const tps = outputTokens / (durationMs / 1000);
+	if (!Number.isFinite(tps) || tps <= 0) return undefined;
+	const value = tps < 10 ? tps.toFixed(1) : tps.toFixed(0);
+	return `${value} tok/s`;
+}
+
+function formatProviderDisplay(model: string | undefined, modelName: string | undefined): string | undefined {
+	if (!model) return undefined;
+	const routingProvider = model.split("/")[0]?.trim();
+	if (!routingProvider) return undefined;
+	const inference = modelName ? extractInferenceProvider(modelName) : undefined;
+	const via = formatInferenceProvider(inference, routingProvider);
+	if (via) {
+		// via is "via <inference>" — strip prefix and reformat as "routing → inference" to match picker clarity
+		const inferenceOnly = via.replace(/^via\s+/, "");
+		return `${routingProvider} → ${inferenceOnly}`;
+	}
+	return routingProvider;
+}
+
 function formatToolPreview(name: string, args: Record<string, unknown>): string {
 	switch (name) {
 		case "bash":
@@ -329,7 +352,7 @@ function truncLine(text: string, maxWidth: number): string {
 
 // ── Subagent Execution ────────────────────────────────────────────────
 
-export type SubagentRunSettings = Pick<AgentEffectiveSettings, "model" | "thinking">;
+export type SubagentRunSettings = Pick<AgentEffectiveSettings, "model" | "thinking"> & { modelName?: string };
 
 export function appendSubagentModelThinkingArgs(args: string[], settings: SubagentRunSettings): void {
 	args.push("--model", settings.model);
@@ -471,6 +494,7 @@ async function runSubagent(
 		output: "",
 		exitCode: 0,
 		model: settings.model,
+		modelName: settings.modelName,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 		progress: {
 			agent: agent.name,
@@ -838,12 +862,16 @@ function renderAgentProgress(
 	if (r.usage.cacheRead) usageParts.push(theme.fg("dim", `R${formatTokens(r.usage.cacheRead)}`));
 	if (r.usage.cacheWrite) usageParts.push(theme.fg("dim", `W${formatTokens(r.usage.cacheWrite)}`));
 	if (r.usage.cost) usageParts.push(theme.fg("dim", `$${r.usage.cost.toFixed(3)}`));
+	const providerDisplay = formatProviderDisplay(r.model, r.modelName);
+	if (providerDisplay) usageParts.push(theme.fg("dim", providerDisplay));
 	if (prog.tokens > 0) {
 		const ctxStr = formatContextUsage(prog.tokens, r.contextWindow);
 		const pct = r.contextWindow ? (prog.tokens / r.contextWindow) * 100 : 0;
 		const coloredCtx = pct > 90 ? theme.fg("error", ctxStr) : pct > 70 ? theme.fg("warning", ctxStr) : theme.fg("dim", ctxStr);
 		usageParts.push(coloredCtx);
 	}
+	const tpsStr = formatTpsValue(r.usage.output, prog.durationMs);
+	if (tpsStr) usageParts.push(theme.fg("dim", tpsStr));
 	if (usageParts.length) {
 		addLine(usageParts.join(" "));
 	}
@@ -965,13 +993,31 @@ export function buildAgentItems(agentList: readonly AgentConfig[], models: reado
 	});
 }
 
+export function extractInferenceProvider(name: string): string | undefined {
+	const match = name.match(/\(([^)]+)\)\s*$/);
+	if (!match) return undefined;
+	const inference = match[1].split(":")[0].trim();
+	return inference ? inference : undefined;
+}
+
+export function formatInferenceProvider(inference: string | undefined, routingProvider: string): string | undefined {
+	if (!inference) return undefined;
+	const normalize = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, "");
+	if (normalize(inference) === normalize(routingProvider)) return undefined;
+	return `via ${inference}`;
+}
+
 export function buildModelItems(models: readonly Model<Api>[]): SelectItem[] {
 	return models
-		.map((model) => ({
-			value: canonicalModelRef(model),
-			label: canonicalModelRef(model),
-			description: [model.name, formatModelContext(model.contextWindow)].filter(Boolean).join(" · "),
-		}))
+		.map((model) => {
+			const inference = extractInferenceProvider(model.name);
+			const via = formatInferenceProvider(inference, model.provider);
+			return {
+				value: canonicalModelRef(model),
+				label: canonicalModelRef(model),
+				description: [model.name, via, formatModelContext(model.contextWindow)].filter(Boolean).join(" · "),
+			};
+		})
 		.sort((a, b) => a.value.localeCompare(b.value));
 }
 
@@ -1141,19 +1187,22 @@ export default function (pi: ExtensionAPI) {
 
 			const effective = resolveEffectiveAgentSettings(agent, ctx.modelRegistry.getAll());
 			const contextWindow = effective.resolvedModel?.contextWindow;
+			const effectiveModelName = effective.resolvedModel?.name;
+			const effectiveSettings: SubagentRunSettings = { model: effective.model, thinking: effective.thinking, modelName: effectiveModelName };
 			const liveResult: AgentResult = {
 				agent: params.agent,
 				task: params.task,
 				output: "",
 				exitCode: -1,
 				model: effective.model,
+				modelName: effectiveModelName,
 				contextWindow,
 				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 				progress: { agent: params.agent, status: "running" as const, task: params.task, recentTools: [], toolCount: 0, tokens: 0, durationMs: 0, lastMessage: "" },
 			};
 
 			const result = await semaphore.run(() =>
-				runSubagent(agent, params.task!, params.cwd ?? cwd, effective, signal, (progress, usage) => {
+				runSubagent(agent, params.task!, params.cwd ?? cwd, effectiveSettings, signal, (progress, usage) => {
 					liveResult.progress = progress;
 					liveResult.usage = { ...usage };
 					onUpdate?.({
@@ -1164,6 +1213,8 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			result.contextWindow = contextWindow;
+			if (!result.modelName) result.modelName = effectiveModelName;
+			liveResult.modelName = result.modelName;
 			const isError = result.exitCode !== 0 || !!result.progress.error;
 			return {
 				content: [{ type: "text", text: result.output || "(no output)" }],
