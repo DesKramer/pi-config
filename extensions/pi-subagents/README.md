@@ -4,18 +4,17 @@ A [pi](https://github.com/earendil-works/pi) extension that registers a single `
 
 | Agent | Tools | Model | Purpose |
 |-------|-------|-------|---------|
-| **scout** | read, grep, find, ls, mem0_memory | gpt-5.5 (medium) | Fast codebase recon with explicit local-memory search/add |
-| **orchestrator** | subagent | gpt-5.5 (medium) | Coordinates autonomous improvement campaigns |
-| **researcher** | read/search tools, subagent | gpt-5.5 (medium) | Investigates opportunities and proposes experiments |
-| **experimenter** | read, write, edit, safe_bash, subagent | gpt-5.5 (medium) | Implements and measures bounded experiments |
-| **evaluator** | read/search tools, safe_bash, subagent | gpt-5.5 (medium) | Independently evaluates candidates |
-| **historian** | read, write, edit | gpt-5.5 (medium) | Maintains concise campaign memory |
-| **web-researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | gpt-5.5 (medium) | Web research |
-| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory | gpt-5.5 (medium) | Code changes with explicit local-memory search/add (can dispatch scout/web-researcher to protect its own context) |
-| **acceptance-criteria** | read, grep, find | gpt-5.5 (medium) | Derives testable acceptance criteria and identifies ambiguities |
-| **qa** | read, grep, find, safe_bash | gpt-5.5 (medium) | Runs focused read-only QA and reports evidence |
+| **scout** | read, grep, find, ls, mem0_memory | openai-codex/gpt-5.6-sol (max) | Fast codebase recon with explicit local-memory search/add |
+| **orchestrator** | subagent | openai-codex/gpt-5.6-sol (max) | Coordinates autonomous improvement campaigns |
+| **researcher** | read, grep, find, ls, subagent | openai-codex/gpt-5.6-sol (max) | Investigates opportunities and proposes experiments |
+| **experimenter** | read, write, edit, safe_bash, subagent | openai-codex/gpt-5.6-sol (max) | Implements and measures bounded experiments |
+| **evaluator** | read, grep, find, ls, safe_bash, web_search, fetch_content, subagent | openai-codex/gpt-5.6-sol (max) | Independently evaluates candidates |
+| **web-researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | openai-codex/gpt-5.6-sol (max) | Web research |
+| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory | openai-codex/gpt-5.6-sol (max) | Code changes with explicit local-memory search/add (can dispatch scout/web-researcher to protect its own context) |
+| **acceptance-criteria** | read, grep, find | openai-codex/gpt-5.6-sol (max) | Derives testable acceptance criteria and identifies ambiguities |
+| **qa** | read, grep, find, safe_bash | openai-codex/gpt-5.6-sol (max) | Runs focused read-only QA and reports evidence |
 
-Agent recursion is constrained with `subagent_agents` allowlists. The orchestrator can dispatch the four campaign agents; those agents can only dispatch compatible focused helpers, and the historian cannot spawn agents.
+Agent recursion is constrained with `subagent_agents` allowlists. The orchestrator can dispatch researcher, experimenter, and evaluator; nested agents can only dispatch their compatible focused helpers.
 
 ## Dependencies
 
@@ -23,7 +22,20 @@ Agent recursion is constrained with `subagent_agents` allowlists. The orchestrat
 
 ## Usage
 
-Run `/agents` in the TUI to open a list of registered agents, including each agent's description, effective model, thinking level, and tools. Select an agent, then type in the model picker to fuzzy-search Pi's configured model registry by provider, model ID, or display name. After choosing a model, select a reasoning level supported by that model. Changes apply to subsequent runs in the current Pi session only; canceling any picker leaves the agent unchanged, and restarting or reloading Pi restores the agent definitions.
+Run `/agents` in the TUI to choose between **Availability** and the existing **Models & reasoning** editor. Availability uses Pi's SettingsList controls: select a profile and press Enter/Space to toggle it. The model editor still lets you select an agent, fuzzy-search Pi's configured model registry by provider/model/display name, and choose a supported reasoning level.
+
+Both availability and model/reasoning overrides apply only to the current Pi runtime and reset when the extension initializes or reloads. All profiles default enabled. A user-disabled profile is omitted from workflow/orchestrator advertising, rejected before a subagent process can spawn, and reported separately from an unknown name. Extension-owned temporary restrictions (for example, an active workflow step allowlist) are intersected with—but never mutate—the user's `/agents` choices. Changes made with `/agents` while restricted take effect when the restriction clears.
+
+When the host exposes command notifications, non-TUI command modes include `[enabled]`/`[disabled]` in the `/agents` summary. Availability can be changed in any command-capable mode:
+
+```text
+/agents enable <name>
+/agents disable <name>
+/agents toggle <name>
+/agents enable all
+/agents disable all
+/agents toggle all
+```
 
 One tool call = one subagent:
 ```json
@@ -78,9 +90,9 @@ Frontmatter fields:
 - **name** (required) — unique agent name, used in `{ agent: "my-agent" }` calls
 - **description** — short description
 - **tools** — comma-separated list of tools the agent needs (builtin or extension). Include `subagent` here to let this agent spawn other agents.
-- **model** — model identifier (defaults to `anthropic/claude-sonnet-4-6`)
-- **thinking** — reasoning level: `off`, `low`, `medium`, `high` (defaults to `medium`)
-- **subagent_agents** — if `subagent` is in `tools`, restrict which agents this one may spawn. Comma-separated list of agent names. Omit for no restriction. Enforced by passing `PI_SUBAGENT_ALLOWED` env to the child `pi` process — the child's subagents extension filters its registry before any tool description sees it, so the child LLM literally can't reference an agent outside the allowlist.
+- **model** — model identifier (defaults to `cosine/glm-5.2`)
+- **thinking** — reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (defaults to `medium`; model support may narrow this list)
+- **subagent_agents** — if `subagent` is in `tools`, restrict which agents this one may spawn. Comma-separated list of agent names. Omit for no profile restriction. Enforced by passing `PI_SUBAGENT_ALLOWED` to the child process. At spawn time this allowlist is intersected with the parent session's enabled profiles; an unrestricted parent likewise passes only enabled profiles when any are disabled. Thus session availability never broadens a profile allowlist, and nested agents cannot see disabled profiles.
 
 The markdown body becomes the agent's system prompt.
 
@@ -98,13 +110,17 @@ interface AgentConfig {
   description: string;
   tools: string[];
   model: string;
-  thinking: string;        // "off" | "low" | "medium" | "high"
+  thinking: string;        // supported level such as "medium", "xhigh", or "max"
   systemPrompt: string;
   filePath: string;
-  subagentAgents?: string[]; // optional spawn-allowlist when `subagent` is in tools
+  subagentAgents?: string[]; // optional spawn-allowlist; [] explicitly allows none
 }
 
-type AgentMetadata = Omit<AgentConfig, "systemPrompt">;
+type AgentMetadata = Omit<AgentConfig, "systemPrompt"> & {
+  enabled: boolean;              // effective runtime availability
+  userEnabled: boolean;          // session-level /agents choice
+  temporarilyRestricted: boolean;
+};
 
 const AGENTS_DIR = path.join(path.dirname(new URL(import.meta.url).pathname), "agents");
 
@@ -114,6 +130,9 @@ function registerMyAgents(): void {
         registerAgent: (config: AgentConfig) => void;
         unregisterAgent: (name: string) => void;
         listAgents: () => AgentMetadata[]; // read-only metadata copy
+        setAgentEnabled: (name: string, enabled: boolean) => boolean;
+        setTemporaryAgentRestriction: (owner: string, allowed: readonly string[]) => boolean;
+        clearTemporaryAgentRestriction: (owner: string) => boolean;
       }
     | undefined;
   if (!subagents) return; // subagents extension not loaded
@@ -134,7 +153,7 @@ function registerMyAgents(): void {
         name: frontmatter.name,
         description: frontmatter.description || "",
         tools,
-        model: frontmatter.model || "anthropic/claude-sonnet-4-6",
+        model: frontmatter.model || "cosine/glm-5.2",
         thinking: frontmatter.thinking || "medium",
         systemPrompt: body,
         filePath,
@@ -149,7 +168,7 @@ function registerMyAgents(): void {
 
 Call `registerMyAgents()` when your extension activates (e.g. in a command handler). The agents become available to the `subagent` tool immediately.
 
-Use `subagents.listAgents()` when another extension needs read-only metadata for validation or UI. It returns copies of the registered agent configs; do not mutate them expecting registry changes.
+Use `subagents.listAgents()` when another extension needs read-only metadata for validation or UI. It returns copies of registered configs plus user and effective availability; consumers should filter `enabled === false` profiles before advertising or accepting them. Do not mutate returned objects. `setAgentEnabled(name, enabled)` changes the user's runtime-only choice. Extensions that need temporary enforcement should instead use an owner-keyed `setTemporaryAgentRestriction()`/`clearTemporaryAgentRestriction()` pair. Restrictions intersect, emit effective availability changes, and leave `/agents` choices intact.
 
 ### 3. Adding custom tool support
 

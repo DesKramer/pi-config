@@ -123,4 +123,7 @@ export type WorkflowPersistedEntry =
 
 export interface ValidationContext {
 	availableAgents?: string[];
+	disabledAgents?: string[];
+	/** Set when runtime delegate validation cannot safely consult the live registry. */
+	agentRegistryError?: string;
 }

@@ -64,7 +64,8 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `firecrawl-tools.ts` | Firecrawl search/scrape tools. |
 | `git-status-widget.ts` | Git status widget/status display. |
 | `mem0.ts` | Optional self-hosted Mem0 OSS memory integration with bounded project recall, explicit capture/search tools, and status diagnostics. |
-| `pi-subagents/` | Subagent tooling with `scout`, `researcher`, `worker`, `acceptance-criteria`, and `qa` agents plus `safe-bash`. |
+| `orchestrator/` | Live-registry orchestration prompt layer that yields to active workflows. |
+| `pi-subagents/` | Subagent tooling with nine bundled profiles (`acceptance-criteria`, `evaluator`, `experimenter`, `orchestrator`, `qa`, `researcher`, `scout`, `web-researcher`, and `worker`) plus `safe-bash`. |
 | `pi-workflow/` | YAML workflow runner with `/workflow` commands, checkpoint tool, and pinned branch-correct state. |
 | `pretty-markdown-code.ts` | Improved markdown/code rendering. |
 | `provider-model-picker.ts` | Provider/model picker helper. |

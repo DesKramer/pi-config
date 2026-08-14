@@ -8,16 +8,16 @@ actual work to subagents via the `subagent` tool (see
 
 ## Behavior
 
-- **On by default.** Every turn gets the layer appended to the system prompt.
+- **On by default.** Every normal turn gets the layer appended to the system prompt.
+- **Workflow-aware.** A running `pi-workflow` owns the prompt, so the generic layer is suppressed until the workflow pauses or ends.
 - **`/orchestrator`** toggles the layer on/off for the current session and
   shows a confirmation notification.
 
 ## Subagent Registry
 
-The layer includes a registry table (`| name | description | tools |`)
-auto-generated at session start by parsing the frontmatter of every `.md` file
-in `../pi-subagents/agents/`. It is parsed once and cached — files are not
-re-read every turn. If the agents directory is missing or a file is
-unparsable, the table is omitted gracefully (no error).
-
-Dependency-free: Node `fs`/`path` only.
+The layer includes a registry table (`| name | description | tools |`) built
+from `pi-subagents`' live `globalThis.__pi_subagents.listAgents()` metadata on
+every turn. Only currently enabled profiles are advertised, so `/agents`
+availability changes and dynamic registration/unregistration take effect
+without stale caches. If the bridge is unavailable or no profiles are enabled,
+the prompt explicitly says that no subagents should be called.

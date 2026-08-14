@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import extension, {
 	appendSubagentModelThinkingArgs,
+	applyAgentAvailabilityCommand,
+	buildAgentAvailabilityItems,
 	buildAgentItems,
+	buildAgentsMenuItems,
 	buildModelItems,
 	buildThinkingItems,
 	filterSelectItems,
 	formatAgentsSummary,
 	listAgents,
+	resolveNestedSubagentAllowlist,
 	runAgentSettingsWizard,
 	type AgentConfig,
 	type AgentSettingsPickOptions,
@@ -17,11 +24,18 @@ import extension, {
 import {
 	canonicalModelRef,
 	clearAgentOverride,
+	clearAllAgentAvailabilityOverrides,
 	clearAllAgentOverrides,
+	clearTemporaryAgentRestriction,
 	getAgentOverride,
+	isAgentEnabled,
+	isAgentTemporarilyRestricted,
+	isAgentUserEnabled,
 	resolveEffectiveAgentSettings,
 	resolveModelRef,
+	setAgentEnabled,
 	setAgentOverride,
+	setTemporaryAgentRestriction,
 } from "../extensions/pi-subagents/settings.ts";
 
 function testModel(
@@ -163,7 +177,10 @@ test("option builders expose effective agent rows, every registry model, and sup
 	assert.equal(agentItems[0].label, "all");
 	assert.match(agentItems[0].description ?? "", /Apply to all 1 agents/);
 	assert.equal(agentItems[1].value, "worker");
-	assert.equal(agentItems[1].description, "openai/plain · thinking: off");
+	assert.equal(agentItems[1].description, "enabled · openai/plain · thinking: off");
+	setAgentEnabled("worker", false);
+	assert.equal(buildAgentItems([worker], models)[1].description, "disabled · openai/plain · thinking: off");
+	setAgentEnabled("worker", true);
 	assert.doesNotMatch(agentItems[1].description ?? "", /does focused work/);
 	assert.doesNotMatch(agentItems[1].description ?? "", /tools:/);
 
@@ -191,19 +208,173 @@ test("model options support fuzzy search across provider, id, and display name",
 	assert.deepEqual(filterSelectItems(items, "").map((item) => item.value), items.map((item) => item.value));
 });
 
-test("non-TUI summary uses effective settings display data", () => {
+test("availability helpers default enabled and update summaries and menu rows", () => {
 	clearAllAgentOverrides();
+	clearAllAgentAvailabilityOverrides();
 	const plainModel = testModel("openai", "plain", { reasoning: false });
 	const deepModel = testModel("anthropic", "deep", { reasoning: true });
 	const worker = testAgent("worker", { tools: ["read", "write"], model: "anthropic/deep", thinking: "medium" });
 	const scout = testAgent("scout", { tools: [], model: "openai/plain", thinking: "high" });
 
 	setAgentOverride("worker", { model: "openai/plain", thinking: "off" });
+	setAgentEnabled("scout", false);
 
+	assert.equal(isAgentEnabled("worker"), true);
+	assert.equal(isAgentEnabled("scout"), false);
 	assert.equal(
 		formatAgentsSummary([worker, scout], [plainModel, deepModel]),
-		"worker: openai/plain · thinking: off (read, write)\nscout: openai/plain · thinking: off (no tools)",
+		"worker [enabled]: openai/plain · thinking: off (read, write)\nscout [disabled]: openai/plain · thinking: off (no tools)",
 	);
+	assert.deepEqual(buildAgentAvailabilityItems([worker, scout]).map((item) => [item.id, item.currentValue]), [
+		["worker", "enabled"],
+		["scout", "disabled"],
+	]);
+	assert.match(buildAgentsMenuItems([worker, scout])[0].description ?? "", /1\/2 agents enabled/);
+});
+
+test("availability commands update persistent choices independently of temporary restrictions", () => {
+	clearAllAgentAvailabilityOverrides();
+	const worker = testAgent("worker");
+	const scout = testAgent("scout");
+	const agentList = [worker, scout];
+
+	assert.equal(applyAgentAvailabilityCommand("disable worker", agentList)?.level, "info");
+	assert.equal(isAgentUserEnabled("worker"), false);
+	assert.equal(applyAgentAvailabilityCommand("toggle worker", agentList)?.message, "worker is now enabled for this session.");
+	assert.equal(isAgentUserEnabled("worker"), true);
+	applyAgentAvailabilityCommand("disable all", agentList);
+	assert.equal(isAgentUserEnabled("worker"), false);
+	assert.equal(isAgentUserEnabled("scout"), false);
+	applyAgentAvailabilityCommand("enable all", agentList);
+	assert.equal(isAgentUserEnabled("worker"), true);
+	assert.equal(isAgentUserEnabled("scout"), true);
+	assert.match(applyAgentAvailabilityCommand("disable missing", agentList)?.message ?? "", /Unknown agent: missing/);
+	assert.match(applyAgentAvailabilityCommand("wat", agentList)?.message ?? "", /Usage:/);
+	assert.equal(applyAgentAvailabilityCommand("", agentList), undefined);
+
+	setAgentEnabled("scout", false);
+	setTemporaryAgentRestriction("test-workflow", ["worker"]);
+	assert.equal(isAgentEnabled("worker"), true);
+	assert.equal(isAgentTemporarilyRestricted("scout"), true);
+
+	applyAgentAvailabilityCommand("toggle all", agentList);
+	assert.equal(isAgentUserEnabled("worker"), false, "toggle-all uses the user's prior choice, not effective availability");
+	assert.equal(isAgentUserEnabled("scout"), true, "a user-disabled choice toggles on even while temporarily restricted");
+	assert.equal(isAgentEnabled("worker"), false);
+	assert.equal(isAgentEnabled("scout"), false);
+
+	clearTemporaryAgentRestriction("test-workflow");
+	assert.equal(isAgentEnabled("worker"), false, "workflow cleanup must preserve a disable made during the workflow");
+	assert.equal(isAgentEnabled("scout"), true, "workflow cleanup must preserve an enable made during the workflow");
+});
+
+test("nested subagent availability intersects profile allowlists without broadening them", () => {
+	clearAllAgentAvailabilityOverrides();
+	const scout = testAgent("scout");
+	const researcher = testAgent("researcher");
+	const worker = testAgent("worker", { tools: ["subagent"], subagentAgents: ["scout"] });
+	const unrestricted = testAgent("orchestrator", { tools: ["subagent"] });
+	const agentList = [scout, researcher, worker, unrestricted];
+
+	assert.deepEqual(resolveNestedSubagentAllowlist(worker, agentList), ["scout"]);
+	assert.deepEqual(resolveNestedSubagentAllowlist(testAgent("none", { tools: ["subagent"], subagentAgents: [] }), agentList), []);
+	assert.equal(resolveNestedSubagentAllowlist(unrestricted, agentList), undefined);
+	setAgentEnabled("scout", false);
+	assert.deepEqual(resolveNestedSubagentAllowlist(worker, agentList), []);
+	assert.deepEqual(resolveNestedSubagentAllowlist(unrestricted, agentList), ["researcher", "worker", "orchestrator"]);
+});
+
+test("nested child prompt advertises only profiles in its effective allowlist", async () => {
+	const tools: any[] = [];
+	extension({ registerCommand: () => {}, registerTool: (tool: unknown) => tools.push(tool) } as any);
+	const tool = tools[0];
+	assert.ok(tool);
+
+	let parentName = "worker";
+	let allowedName = "web-researcher";
+	let replacedProfile = false;
+	const registeredNames = new Set(listAgents().map((agent) => agent.name));
+	if (!registeredNames.has(parentName) || !registeredNames.has("scout") || !registeredNames.has(allowedName)) {
+		// The test runner itself may be a restricted nested agent. Replace one
+		// inherited non-scout profile with an equivalent recursive fixture so the
+		// regression still exercises the real spawn/prompt boundary.
+		const fallback = listAgents().find((agent) => agent.name !== "scout");
+		assert.ok(fallback, "expected a non-scout profile for the recursive prompt fixture");
+		parentName = fallback.name;
+		allowedName = fallback.name;
+		const bridge = (globalThis as any).__pi_subagents;
+		bridge.unregisterAgent(parentName);
+		bridge.registerAgent(testAgent(parentName, {
+			description: "Allowed nested prompt fixture",
+			tools: ["subagent"],
+			subagentAgents: ["scout", allowedName],
+			systemPrompt: [
+				"You are a recursive prompt fixture.",
+				"<!-- pi-subagents:dynamic-guidance:start -->",
+				`Static registry: scout, ${allowedName}.`,
+				"<!-- pi-subagents:dynamic-guidance:end -->",
+				"<!-- pi-subagents:profile:scout:start -->",
+				"Dispatch scout for codebase reconnaissance.",
+				"<!-- pi-subagents:profile:scout:end -->",
+				`<!-- pi-subagents:profile:${allowedName}:start -->`,
+				`Dispatch ${allowedName} for allowed work.`,
+				`<!-- pi-subagents:profile:${allowedName}:end -->`,
+			].join("\n\n"),
+		}));
+		replacedProfile = true;
+	}
+
+	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-prompt-test-"));
+	const runnerPath = path.join(tempDir, "capture-child.mjs");
+	const capturePath = path.join(tempDir, "capture.json");
+	fs.writeFileSync(runnerPath, `
+import fs from "node:fs";
+const promptFlag = process.argv.indexOf("--append-system-prompt");
+if (promptFlag < 0 || !process.argv[promptFlag + 1]) throw new Error("missing child prompt path");
+fs.writeFileSync(process.env.PI_SUBAGENT_TEST_CAPTURE_PATH, JSON.stringify({
+  prompt: fs.readFileSync(process.argv[promptFlag + 1], "utf8"),
+  allowed: process.env.PI_SUBAGENT_ALLOWED,
+  allowlistSet: process.env.PI_SUBAGENT_ALLOWLIST_SET,
+}));
+`);
+
+	const previousEntry = process.argv[1];
+	const previousCapturePath = process.env.PI_SUBAGENT_TEST_CAPTURE_PATH;
+	try {
+		process.argv[1] = runnerPath;
+		process.env.PI_SUBAGENT_TEST_CAPTURE_PATH = capturePath;
+		setAgentEnabled("scout", false);
+		setAgentEnabled(allowedName, true);
+
+		await tool.execute(
+			"capture-prompt",
+			{ agent: parentName, task: "Capture the effective nested prompt." },
+			undefined,
+			undefined,
+			{ cwd: process.cwd(), modelRegistry: { getAll: () => [] } },
+		);
+
+		const captured = JSON.parse(fs.readFileSync(capturePath, "utf8")) as {
+			prompt: string;
+			allowed?: string;
+			allowlistSet?: string;
+		};
+		assert.equal(captured.allowed, allowedName);
+		assert.equal(captured.allowlistSet, "1");
+		assert.doesNotMatch(captured.prompt, /\bscout\b/i);
+		assert.match(captured.prompt, new RegExp(JSON.stringify(allowedName)));
+		assert.match(captured.prompt, /Only the following profiles are available/);
+	} finally {
+		setAgentEnabled("scout", true);
+		if (previousEntry === undefined) delete process.argv[1];
+		else process.argv[1] = previousEntry;
+		if (previousCapturePath === undefined) delete process.env.PI_SUBAGENT_TEST_CAPTURE_PATH;
+		else process.env.PI_SUBAGENT_TEST_CAPTURE_PATH = previousCapturePath;
+		fs.rmSync(tempDir, { recursive: true, force: true });
+		if (replacedProfile) {
+			extension({ registerCommand: () => {}, registerTool: () => {} } as any);
+		}
+	}
 });
 
 test("registered /agents command uses the non-TUI summary path", async () => {
@@ -219,7 +390,7 @@ test("registered /agents command uses the non-TUI summary path", async () => {
 	setAgentOverride(displayedAgent.name, { model: "openai/plain", thinking: "off" });
 
 	const notifications: Array<{ message: string; level: "info" | "warning" }> = [];
-	await commands.get("agents").handler([], {
+	await commands.get("agents").handler("", {
 		mode: "json",
 		ui: { notify: (message: string, level: "info" | "warning") => notifications.push({ message, level }) },
 		modelRegistry: { refresh: async () => {}, getAll: () => [plainModel] },
@@ -227,8 +398,100 @@ test("registered /agents command uses the non-TUI summary path", async () => {
 
 	assert.equal(notifications.length, 1);
 	assert.equal(notifications[0].level, "info");
-	assert.match(notifications[0].message, /^Available agents:\n/);
-	assert.match(notifications[0].message, new RegExp(`${displayedAgent.name}: openai/plain · thinking: off`));
+	assert.match(notifications[0].message, /^Registered agents:\n/);
+	assert.match(notifications[0].message, new RegExp(`${displayedAgent.name} \\[enabled\\]: openai/plain · thinking: off`));
+});
+
+test("global bridge layers temporary restrictions over user choices and emits effective changes", () => {
+	const emitted: Array<{ event: string; data: { name: string; enabled: boolean } }> = [];
+	extension({
+		registerCommand: () => {},
+		registerTool: () => {},
+		events: { emit: (event: string, data: { name: string; enabled: boolean }) => emitted.push({ event, data }) },
+	} as any);
+	const [allowedAgent, restrictedAgent] = listAgents();
+	assert.ok(allowedAgent);
+	assert.ok(restrictedAgent);
+	const bridge = (globalThis as any).__pi_subagents;
+
+	assert.equal(bridge.setTemporaryAgentRestriction("test-workflow", [allowedAgent.name]), true);
+	let metadata = bridge.listAgents().find((agent: any) => agent.name === restrictedAgent.name);
+	assert.deepEqual(
+		{ enabled: metadata?.enabled, userEnabled: metadata?.userEnabled, temporarilyRestricted: metadata?.temporarilyRestricted },
+		{ enabled: false, userEnabled: true, temporarilyRestricted: true },
+	);
+	assert.ok(emitted.some((entry) => entry.data.name === restrictedAgent.name && entry.data.enabled === false));
+
+	assert.equal(bridge.setAgentEnabled(restrictedAgent.name, false), true);
+	assert.equal(bridge.clearTemporaryAgentRestriction("test-workflow"), true);
+	metadata = bridge.listAgents().find((agent: any) => agent.name === restrictedAgent.name);
+	assert.deepEqual(
+		{ enabled: metadata?.enabled, userEnabled: metadata?.userEnabled, temporarilyRestricted: metadata?.temporarilyRestricted },
+		{ enabled: false, userEnabled: false, temporarilyRestricted: false },
+		"clearing a workflow restriction must not overwrite a /agents choice made while it was active",
+	);
+	assert.equal(bridge.setAgentEnabled("not-registered", false), false);
+	assert.equal(bridge.setTemporaryAgentRestriction("bad", ["not-registered"]), false);
+});
+
+test("registered /agents command toggles availability without refreshing models", async () => {
+	const commands = new Map<string, any>();
+	extension({
+		registerCommand: (name: string, command: unknown) => commands.set(name, command),
+		registerTool: () => {},
+	} as any);
+	const displayedAgent = listAgents()[0];
+	assert.ok(displayedAgent, "expected at least one bundled subagent");
+	let refreshes = 0;
+	const notifications: Array<{ message: string; level: "info" | "warning" }> = [];
+
+	await commands.get("agents").handler(`disable ${displayedAgent.name}`, {
+		mode: "json",
+		ui: { notify: (message: string, level: "info" | "warning") => notifications.push({ message, level }) },
+		modelRegistry: { refresh: async () => { refreshes++; }, getAll: () => [] },
+	});
+
+	assert.equal(refreshes, 0);
+	assert.equal(listAgents().find((agent) => agent.name === displayedAgent.name)?.enabled, false);
+	assert.match(notifications[0].message, /is now disabled/);
+});
+
+test("subagent execution distinguishes disabled profiles from unknown names before spawning", async () => {
+	const tools: any[] = [];
+	extension({ registerCommand: () => {}, registerTool: (tool: unknown) => tools.push(tool) } as any);
+	const tool = tools[0];
+	const displayedAgent = listAgents()[0];
+	assert.ok(displayedAgent);
+	setAgentEnabled(displayedAgent.name, false);
+	const ctx = { cwd: process.cwd(), modelRegistry: { getAll: () => [] } };
+
+	await assert.rejects(
+		tool.execute("disabled", { agent: displayedAgent.name, task: "do not spawn" }, undefined, undefined, ctx),
+		new RegExp(`Agent is disabled for this session: ${displayedAgent.name}`),
+	);
+	setAgentEnabled(displayedAgent.name, true);
+	setTemporaryAgentRestriction("test-workflow", []);
+	await assert.rejects(
+		tool.execute("restricted", { agent: displayedAgent.name, task: "do not spawn" }, undefined, undefined, ctx),
+		new RegExp(`temporarily unavailable.*${displayedAgent.name}`),
+	);
+	clearTemporaryAgentRestriction("test-workflow");
+	const previousWorkflow = (globalThis as any).__pi_workflow;
+	try {
+		(globalThis as any).__pi_workflow = {
+			canRunAgent: () => ({ allowed: false, reason: "Workflow enforcement is unavailable." }),
+		};
+		await assert.rejects(
+			tool.execute("workflow-blocked", { agent: displayedAgent.name, task: "do not spawn" }, undefined, undefined, ctx),
+			/Workflow enforcement is unavailable/,
+		);
+	} finally {
+		(globalThis as any).__pi_workflow = previousWorkflow;
+	}
+	await assert.rejects(
+		tool.execute("unknown", { agent: "not-registered", task: "do not spawn" }, undefined, undefined, ctx),
+		/Unknown agent: not-registered/,
+	);
 });
 
 test("settings wizard applies only after agent, model, and reasoning are selected", async () => {
@@ -306,8 +569,12 @@ test("child CLI model/thinking args consume the effective per-agent override", (
 
 test("extension init resets session-only overrides so they do not persist", () => {
 	clearAllAgentOverrides();
+	clearAllAgentAvailabilityOverrides();
 	setAgentOverride("worker", { model: "anthropic/deep", thinking: "high" });
+	setAgentEnabled("worker", false);
+	setTemporaryAgentRestriction("test-workflow", []);
 	assert.deepEqual(getAgentOverride("worker"), { model: "anthropic/deep", thinking: "high" });
+	assert.equal(isAgentEnabled("worker"), false);
 
 	const commands = new Map<string, unknown>();
 	const tools: unknown[] = [];
@@ -317,6 +584,8 @@ test("extension init resets session-only overrides so they do not persist", () =
 	} as any);
 
 	assert.equal(getAgentOverride("worker"), undefined);
+	assert.equal(isAgentEnabled("worker"), true);
+	assert.equal(isAgentTemporarilyRestricted("worker"), false);
 	assert.equal(commands.has("agents"), true);
 	assert.equal(tools.length, 1);
 });

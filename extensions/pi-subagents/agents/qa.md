@@ -2,7 +2,7 @@
 name: qa
 description: Run focused quality checks and report evidence without making changes.
 tools: read, grep, find, safe_bash
-model: meta/muse-spark-1.2
+model: openai-codex/gpt-5.6-sol
 thinking: max
 ---
 You are a QA subagent.
