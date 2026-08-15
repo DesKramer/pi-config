@@ -1,9 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 
-const PROVIDER_LABELS: Record<string, string> = {
-	"azure-openai-responses": "Azure OpenAI",
-};
+const PROVIDER_LABELS: Record<string, string> = {};
 
 function providerLabel(ctx: ExtensionCommandContext, provider: string): string {
 	return PROVIDER_LABELS[provider] ?? ctx.modelRegistry.getProviderDisplayName(provider);

@@ -1,6 +1,6 @@
 import { getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 
-export const DEFAULT_AGENT_MODEL = "anthropic/claude-sonnet-4-6";
+export const DEFAULT_AGENT_MODEL = "cosine/glm-5.2";
 export const DEFAULT_AGENT_THINKING: ModelThinkingLevel = "medium";
 
 export const ALL_MODEL_THINKING_LEVELS: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -22,6 +22,8 @@ export interface AgentEffectiveSettings extends AgentSettingsOverride {
 }
 
 const agentOverrides = new Map<string, AgentSettingsOverride>();
+const userDisabledAgents = new Set<string>();
+const temporaryAgentRestrictions = new Map<string, ReadonlySet<string>>();
 const thinkingLevels = new Set<ModelThinkingLevel>(ALL_MODEL_THINKING_LEVELS);
 
 export function canonicalModelRef(model: Pick<Model<Api>, "provider" | "id">): string {
@@ -74,6 +76,52 @@ export function clearAgentOverride(agentName: string): void {
 
 export function clearAllAgentOverrides(): void {
 	agentOverrides.clear();
+}
+
+export function isAgentUserEnabled(agentName: string): boolean {
+	return !userDisabledAgents.has(agentName);
+}
+
+export function isAgentTemporarilyRestricted(agentName: string): boolean {
+	for (const allowedAgents of temporaryAgentRestrictions.values()) {
+		if (!allowedAgents.has(agentName)) return true;
+	}
+	return false;
+}
+
+/** Effective runtime availability: the user's choice intersected with temporary restrictions. */
+export function isAgentEnabled(agentName: string): boolean {
+	return isAgentUserEnabled(agentName) && !isAgentTemporarilyRestricted(agentName);
+}
+
+/** Update only the user's session-level availability choice. */
+export function setAgentEnabled(agentName: string, enabled: boolean): void {
+	if (enabled) userDisabledAgents.delete(agentName);
+	else userDisabledAgents.add(agentName);
+}
+
+export function toggleAgentEnabled(agentName: string): boolean {
+	const enabled = !isAgentUserEnabled(agentName);
+	setAgentEnabled(agentName, enabled);
+	return enabled;
+}
+
+export function setTemporaryAgentRestriction(owner: string, allowedAgents: readonly string[]): void {
+	if (!owner.trim()) throw new Error("Temporary agent restriction owner must be non-empty.");
+	temporaryAgentRestrictions.set(owner, new Set(allowedAgents));
+}
+
+export function clearTemporaryAgentRestriction(owner: string): void {
+	temporaryAgentRestrictions.delete(owner);
+}
+
+export function clearAgentAvailabilityOverride(agentName: string): void {
+	userDisabledAgents.delete(agentName);
+}
+
+export function clearAllAgentAvailabilityOverrides(): void {
+	userDisabledAgents.clear();
+	temporaryAgentRestrictions.clear();
 }
 
 export function resolveEffectiveAgentSettings(

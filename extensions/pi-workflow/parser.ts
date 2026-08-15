@@ -285,19 +285,36 @@ export function validateWorkflowDefinition(workflow: WorkflowDefinition, context
 		for (const [outcome, transition] of Object.entries(step.transitions ?? {})) {
 			if (!stepIds.has(transition.target)) diagnostics.push({ severity: "error", path: `steps.${stepId}.transitions.${outcome}`, message: `Transition target does not exist: ${transition.target}.` });
 		}
-		if (step.type === "delegate" && step.delegate && context.availableAgents) {
-			const available = new Set(context.availableAgents);
-			const names = step.delegate.agent
-				? [step.delegate.agent]
-				: step.delegate.tasks?.map((task) => task.agent) ?? step.delegate.agents ?? [];
-			for (const name of names) {
-				if (!available.has(name)) {
-					diagnostics.push({
-						severity: "error",
-						path: `steps.${stepId}.delegate`,
-						message: `Unknown delegate agent: ${name}.`,
-						suggestion: `Install/register that subagent or use one of: ${context.availableAgents.join(", ") || "(none available)"}.`,
-					});
+		if (step.type === "delegate" && step.delegate) {
+			if (context.agentRegistryError) {
+				diagnostics.push({
+					severity: "error",
+					path: `steps.${stepId}.delegate`,
+					message: `Cannot validate delegate agents: ${context.agentRegistryError}`,
+					suggestion: "Load or repair pi-subagents, then validate the workflow again.",
+				});
+			} else if (context.availableAgents) {
+				const available = new Set(context.availableAgents);
+				const disabled = new Set(context.disabledAgents ?? []);
+				const names = step.delegate.agent
+					? [step.delegate.agent]
+					: step.delegate.tasks?.map((task) => task.agent) ?? step.delegate.agents ?? [];
+				for (const name of new Set(names)) {
+					if (disabled.has(name)) {
+						diagnostics.push({
+							severity: "error",
+							path: `steps.${stepId}.delegate`,
+							message: `Disabled delegate agent: ${name}.`,
+							suggestion: `Re-enable it with /agents enable ${name}, or choose another enabled profile.`,
+						});
+					} else if (!available.has(name)) {
+						diagnostics.push({
+							severity: "error",
+							path: `steps.${stepId}.delegate`,
+							message: `Unknown delegate agent: ${name}.`,
+							suggestion: `Install/register that subagent or use one of: ${context.availableAgents.join(", ") || "(none available)"}.`,
+						});
+					}
 				}
 			}
 		}
@@ -427,14 +444,28 @@ export function loadWorkflowCatalog(options: { cwd: string; projectTrusted: bool
 	function addFile(filePath: string, source: WorkflowSource): void {
 		const parsed = parseWorkflowFile(filePath, source, options.validation ?? {});
 		diagnostics.push(...parsed.diagnostics.map((d) => ({ ...d, path: d.path || filePath })));
-		if (!parsed.workflow || !parsed.hash) return;
-		const key = `${source}:${parsed.workflow.name}`;
-		const priorSameSource = seenBySource.get(key);
-		if (priorSameSource) {
-			diagnostics.push({ severity: "error", path: filePath, message: `Duplicate ${source} workflow name: ${parsed.workflow.name}.`, suggestion: `Rename one of: ${priorSameSource} or ${filePath}.` });
-			return;
+		const rawName = (() => {
+			try {
+				const raw = parseDocument(fs.readFileSync(filePath, "utf-8"), { strict: true, uniqueKeys: true }).toJSON();
+				return isRecord(raw) && typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : undefined;
+			} catch {
+				return undefined;
+			}
+		})();
+		const workflowName = parsed.workflow?.name ?? rawName;
+		if (workflowName) {
+			const key = `${source}:${workflowName}`;
+			const priorSameSource = seenBySource.get(key);
+			if (priorSameSource) {
+				diagnostics.push({ severity: "error", path: filePath, message: `Duplicate ${source} workflow name: ${workflowName}.`, suggestion: `Rename one of: ${priorSameSource} or ${filePath}.` });
+				return;
+			}
+			seenBySource.set(key, filePath);
+			// A higher-precedence invalid project file still owns its declared name;
+			// never fall back to a valid user workflow and bypass its diagnostics.
+			if (source === "project") byName.delete(workflowName);
 		}
-		seenBySource.set(key, filePath);
+		if (!parsed.workflow || !parsed.hash) return;
 		byName.set(parsed.workflow.name, {
 			workflow: parsed.workflow,
 			path: filePath,

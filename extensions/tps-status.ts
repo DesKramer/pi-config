@@ -65,6 +65,10 @@ function subagentResultCost(result: unknown): number {
 	let cost = 0;
 	const usageCost = obj.usage?.cost;
 	if (typeof usageCost === "number" && Number.isFinite(usageCost)) cost += usageCost;
+	else if (usageCost && typeof usageCost === "object") {
+		const total = (usageCost as { total?: unknown }).total;
+		if (typeof total === "number" && Number.isFinite(total)) cost += total;
+	}
 	const recentTools = obj.progress?.recentTools;
 	if (Array.isArray(recentTools)) {
 		for (const tool of recentTools) {
@@ -101,21 +105,36 @@ function createFooter(getCtx: () => any, pi: ExtensionAPI, getTpsDisplay: () => 
 			let totalCost = 0;
 			let latestCacheHitRate: number | undefined;
 
-			for (const entry of ctx.sessionManager.getEntries()) {
+			const entries = typeof ctx.sessionManager.getBranch === "function"
+				? ctx.sessionManager.getBranch()
+				: ctx.sessionManager.getEntries();
+			for (const entry of entries) {
 				if (entry.type === "message" && entry.message.role === "assistant") {
-					totalInput += entry.message.usage.input;
-					totalOutput += entry.message.usage.output;
-					totalCacheRead += entry.message.usage.cacheRead;
-					totalCacheWrite += entry.message.usage.cacheWrite;
-					totalCost += entry.message.usage.cost.total;
+					const usage = (entry.message as any).usage;
+					if (!usage) continue;
+					totalInput += usage.input ?? 0;
+					totalOutput += usage.output ?? 0;
+					totalCacheRead += usage.cacheRead ?? 0;
+					totalCacheWrite += usage.cacheWrite ?? 0;
+					const costTotal = usage.cost?.total;
+					if (typeof costTotal === "number" && Number.isFinite(costTotal)) totalCost += costTotal;
 
 					const latestPromptTokens =
-						entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
+						(usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
 					latestCacheHitRate = latestPromptTokens > 0
-						? (entry.message.usage.cacheRead / latestPromptTokens) * 100
+						? ((usage.cacheRead ?? 0) / latestPromptTokens) * 100
 						: undefined;
-				} else {
-					totalCost += subagentEntryCost(entry);
+				} else if (entry.type === "message" && (entry.message as any).role === "toolResult") {
+					const msg = entry.message as any;
+					if (msg.toolName === "subagent") {
+						totalCost += subagentEntryCost(entry);
+					} else if (msg.usage?.cost?.total !== undefined) {
+						const c = msg.usage.cost.total;
+						if (typeof c === "number" && Number.isFinite(c)) totalCost += c;
+					}
+				} else if ((entry.type === "compaction" || entry.type === "branch_summary") && (entry as any).usage?.cost?.total !== undefined) {
+					const c = (entry as any).usage.cost.total;
+					if (typeof c === "number" && Number.isFinite(c)) totalCost += c;
 				}
 			}
 
@@ -287,6 +306,24 @@ export default function (pi: ExtensionAPI): void {
 		if (!ctx.hasUI) return;
 		lastTpsDisplay = state?.lastDisplay ?? lastTpsDisplay;
 		state = undefined;
+		requestFooterRender(ctx);
+	});
+
+	pi.on("tool_execution_start", (_event, ctx) => {
+		renderCtx = ctx;
+		if (!ctx.hasUI) return;
+		requestFooterRender(ctx);
+	});
+
+	pi.on("tool_execution_update", (_event, ctx) => {
+		renderCtx = ctx;
+		if (!ctx.hasUI) return;
+		requestFooterRender(ctx);
+	});
+
+	pi.on("tool_execution_end", (_event, ctx) => {
+		renderCtx = ctx;
+		if (!ctx.hasUI) return;
 		requestFooterRender(ctx);
 	});
 }

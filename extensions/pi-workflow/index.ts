@@ -7,23 +7,81 @@ import type { ValidationContext, WorkflowCatalogEntry, WorkflowEvent, WorkflowSn
 
 const CHECKPOINT_TOOL = "workflow_checkpoint";
 
+interface SubagentMetadata {
+	name: string;
+	description?: string;
+	enabled?: boolean;
+	userEnabled?: boolean;
+	temporarilyRestricted?: boolean;
+}
+
 type SubagentsBridge = {
-	listAgents?: () => Array<{ name: string; description?: string }>;
+	listAgents?: () => SubagentMetadata[];
+	setTemporaryAgentRestriction?: (owner: string, allowedAgents: readonly string[]) => boolean;
+	clearTemporaryAgentRestriction?: (owner: string) => boolean;
 };
 
-function getSubagentNames(): string[] | undefined {
+interface SubagentMetadataResult {
+	bridge?: SubagentsBridge;
+	metadata?: SubagentMetadata[];
+	error?: string;
+}
+
+function readSubagentMetadata(): SubagentMetadataResult {
 	const bridge = (globalThis as any).__pi_subagents as SubagentsBridge | undefined;
-	if (!bridge?.listAgents) return undefined;
+	if (!bridge) return { error: "pi-subagents registry bridge is unavailable." };
+	if (!bridge.listAgents) return { bridge, error: "pi-subagents registry bridge does not provide listAgents()." };
 	try {
-		return bridge.listAgents().map((agent) => agent.name).filter(Boolean).sort((a, b) => a.localeCompare(b));
-	} catch {
-		return undefined;
+		const metadata = bridge.listAgents();
+		if (!Array.isArray(metadata)) return { bridge, error: "pi-subagents listAgents() returned invalid metadata." };
+		return { bridge, metadata };
+	} catch (error) {
+		return { bridge, error: `pi-subagents listAgents() failed: ${error instanceof Error ? error.message : String(error)}` };
 	}
 }
 
+export function getSubagentNames(): string[] | undefined {
+	const result = readSubagentMetadata();
+	if (!result.metadata) return result.bridge ? [] : undefined;
+	return result.metadata
+		.filter((agent) => agent.enabled !== false)
+		.map((agent) => agent.name)
+		.filter(Boolean)
+		.sort((a, b) => a.localeCompare(b));
+}
+
+interface WorkflowAgentPromptContext {
+	enabledAgents: string[];
+	knownAgents: string[];
+	error?: string;
+}
+
+function workflowAgentPromptContext(): WorkflowAgentPromptContext {
+	const result = readSubagentMetadata();
+	if (result.error || !result.metadata) {
+		return { enabledAgents: [], knownAgents: [], error: result.error ?? "pi-subagents registry metadata is unavailable." };
+	}
+	const knownAgents = result.metadata.map((agent) => agent.name).filter(Boolean).sort((a, b) => a.localeCompare(b));
+	const enabledAgents = result.metadata
+		.filter((agent) => agent.enabled !== false)
+		.map((agent) => agent.name)
+		.filter(Boolean)
+		.sort((a, b) => a.localeCompare(b));
+	return { enabledAgents, knownAgents };
+}
+
 function validationContext(): ValidationContext {
-	const availableAgents = getSubagentNames();
-	return availableAgents ? { availableAgents } : {};
+	const result = readSubagentMetadata();
+	if (result.error || !result.metadata) return { agentRegistryError: result.error ?? "pi-subagents registry metadata is unavailable." };
+	if (!result.bridge?.setTemporaryAgentRestriction || !result.bridge.clearTemporaryAgentRestriction) {
+		return { agentRegistryError: "pi-subagents registry bridge does not support temporary workflow restrictions." };
+	}
+	return {
+		availableAgents: result.metadata.map((agent) => agent.name).filter(Boolean).sort((a, b) => a.localeCompare(b)),
+		disabledAgents: result.metadata
+			.filter((agent) => (agent.userEnabled ?? agent.enabled) === false)
+			.map((agent) => agent.name),
+	};
 }
 
 function isTrusted(ctx: ExtensionContext): boolean {
@@ -93,8 +151,115 @@ function commandUsage(): string {
 	].join("\n");
 }
 
+const WORKFLOW_RESTRICTION_OWNER = "pi-workflow";
+
+export interface WorkflowAgentAvailabilityUpdate {
+	ok: boolean;
+	required: boolean;
+	error?: string;
+}
+
+export interface WorkflowAgentAvailabilityController {
+	setSnapshot(snapshot: WorkflowSnapshot | undefined): WorkflowAgentAvailabilityUpdate;
+	restore(): WorkflowAgentAvailabilityUpdate;
+}
+
+function delegateAgentNames(snapshot: WorkflowSnapshot | undefined): string[] | undefined {
+	if (!snapshot || snapshot.status !== "running" || !snapshot.currentStep) return undefined;
+	const step = snapshot.workflow.steps[snapshot.currentStep];
+	if (step?.type !== "delegate" || !step.delegate) return undefined;
+	const names = step.delegate.agent
+		? [step.delegate.agent]
+		: step.delegate.tasks?.map((task) => task.agent) ?? step.delegate.agents ?? [];
+	return [...new Set(names)].sort((a, b) => a.localeCompare(b));
+}
+
+function executableDelegateAgentNames(snapshot: WorkflowSnapshot, enabledAgents: readonly string[]): string[] {
+	if (!snapshot.currentStep) return [];
+	const step = snapshot.workflow.steps[snapshot.currentStep];
+	if (step?.type !== "delegate" || !step.delegate) return [];
+	const enabled = new Set(enabledAgents);
+	if (step.delegate.agent) return enabled.has(step.delegate.agent) ? [step.delegate.agent] : [];
+	if (step.delegate.tasks) {
+		if (!step.delegate.tasks.every((task) => enabled.has(task.agent))) return [];
+		return [...new Set(step.delegate.tasks.map((task) => task.agent))].sort((a, b) => a.localeCompare(b));
+	}
+	return [...new Set((step.delegate.agents ?? []).filter((name) => enabled.has(name)))].sort((a, b) => a.localeCompare(b));
+}
+
+export function createWorkflowAgentAvailabilityController(): WorkflowAgentAvailabilityController {
+	// Start pending so a hot-reloaded workflow extension clears a restriction left
+	// by its previous controller. Failed clears retain this bit and are retried.
+	let restrictionMayExist = true;
+
+	const reconcile = (allowedAgents: readonly string[] | undefined): WorkflowAgentAvailabilityUpdate => {
+		const bridge = (globalThis as any).__pi_subagents as SubagentsBridge | undefined;
+		if (allowedAgents) {
+			if (!bridge?.setTemporaryAgentRestriction) {
+				return { ok: false, required: true, error: "pi-subagents cannot enforce temporary workflow restrictions." };
+			}
+			// A bridge may apply its state before returning false/throwing (for
+			// example, while notifying listeners). Keep clear bookkeeping pending
+			// before the call so rollback and later turns can always retry cleanup.
+			restrictionMayExist = true;
+			try {
+				if (bridge.setTemporaryAgentRestriction(WORKFLOW_RESTRICTION_OWNER, allowedAgents) !== true) {
+					return { ok: false, required: true, error: "pi-subagents rejected the temporary workflow restriction." };
+				}
+				return { ok: true, required: true };
+			} catch (error) {
+				return { ok: false, required: true, error: `pi-subagents restriction failed: ${error instanceof Error ? error.message : String(error)}` };
+			}
+		}
+
+		if (!restrictionMayExist) return { ok: true, required: false };
+		if (!bridge?.clearTemporaryAgentRestriction) {
+			return { ok: false, required: false, error: "pi-subagents cannot clear the temporary workflow restriction yet." };
+		}
+		try {
+			if (bridge.clearTemporaryAgentRestriction(WORKFLOW_RESTRICTION_OWNER) !== true) {
+				return { ok: false, required: false, error: "pi-subagents did not clear the temporary workflow restriction yet." };
+			}
+			restrictionMayExist = false;
+			return { ok: true, required: false };
+		} catch (error) {
+			return { ok: false, required: false, error: `pi-subagents restriction restore failed: ${error instanceof Error ? error.message : String(error)}` };
+		}
+	};
+
+	return {
+		setSnapshot(snapshot) {
+			return reconcile(delegateAgentNames(snapshot));
+		},
+		restore() {
+			return reconcile(undefined);
+		},
+	};
+}
+
 export default function piWorkflowExtension(pi: ExtensionAPI): void {
 	let activeSnapshot: WorkflowSnapshot | undefined;
+	let agentExecutionReady = false;
+	let executableAgents = new Set<string>();
+	const workflowAgentAvailability = createWorkflowAgentAvailabilityController();
+	const workflowRuntimeBridge = {
+		isRunning: () => activeSnapshot?.status === "running",
+		canRunAgent: (name: string): { allowed: boolean; reason?: string } => {
+			if (!activeSnapshot || activeSnapshot.status !== "running") return { allowed: true };
+			const step = activeSnapshot.currentStep ? activeSnapshot.workflow.steps[activeSnapshot.currentStep] : undefined;
+			if (step?.type !== "delegate") {
+				return { allowed: false, reason: "The current workflow step does not permit subagent execution." };
+			}
+			if (!agentExecutionReady) {
+				return { allowed: false, reason: "The active workflow could not verify its delegate restriction." };
+			}
+			if (!executableAgents.has(name)) {
+				return { allowed: false, reason: `Agent ${name} is unavailable to the active workflow step.` };
+			}
+			return { allowed: true };
+		},
+	};
+	(globalThis as any).__pi_workflow = workflowRuntimeBridge;
 
 	function setCheckpointToolActive(active: boolean): void {
 		try {
@@ -129,16 +294,37 @@ export default function piWorkflowExtension(pi: ExtensionAPI): void {
 	}
 
 	function setSnapshot(ctx: ExtensionContext, snapshot: WorkflowSnapshot, events?: WorkflowEvent[]): void {
+		const previousSnapshot = activeSnapshot;
+		const availability = workflowAgentAvailability.setSnapshot(snapshot);
+		if (availability.required && !availability.ok) {
+			const rollback = workflowAgentAvailability.setSnapshot(previousSnapshot);
+			agentExecutionReady = false;
+			executableAgents = new Set();
+			const rollbackMessage = rollback.ok ? "" : ` Restoration also needs retrying: ${rollback.error}`;
+			throw new Error(`Cannot enter workflow delegate step because its runtime restriction was not enforced: ${availability.error}${rollbackMessage}`);
+		}
 		activeSnapshot = snapshot;
+		agentExecutionReady = false;
+		executableAgents = new Set();
 		setCheckpointToolActive(snapshot.status === "running");
 		if (events) persist(events, snapshot);
 		updateUi(ctx);
+		if (!availability.ok) {
+			ctx.ui.notify(`Workflow state changed, but temporary agent availability restoration will be retried. ${availability.error}`, "warning");
+		}
 	}
 
 	function restore(ctx: ExtensionContext): void {
+		workflowAgentAvailability.restore();
 		activeSnapshot = restoreSnapshotFromBranch(ctx.sessionManager.getBranch() as any[]);
+		const availability = workflowAgentAvailability.setSnapshot(activeSnapshot);
+		agentExecutionReady = false;
+		executableAgents = new Set();
 		setCheckpointToolActive(activeSnapshot?.status === "running");
 		updateUi(ctx);
+		if (!availability.ok && ctx.hasUI) {
+			ctx.ui.notify(`Temporary agent availability restoration will be retried. ${availability.error}`, "warning");
+		}
 		if (activeSnapshot?.status === "interrupted" && ctx.hasUI) {
 			ctx.ui.notify(`Workflow ${activeSnapshot.workflowName} was interrupted during session restore. Use /workflow resume to continue.`, "warning");
 		}
@@ -146,12 +332,37 @@ export default function piWorkflowExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => restore(ctx));
 	pi.on("session_tree", async (_event, ctx) => restore(ctx));
-	pi.on("session_shutdown", async () => setCheckpointToolActive(false));
+	pi.on("session_shutdown", async () => {
+		activeSnapshot = undefined;
+		agentExecutionReady = false;
+		executableAgents = new Set();
+		workflowAgentAvailability.restore();
+		setCheckpointToolActive(false);
+	});
 
 	pi.on("before_agent_start", async (_event, _ctx) => {
+		const availability = workflowAgentAvailability.setSnapshot(activeSnapshot);
+		agentExecutionReady = false;
+		executableAgents = new Set();
 		if (!activeSnapshot || activeSnapshot.status !== "running") return;
+		if (availability.required && !availability.ok) {
+			setCheckpointToolActive(false);
+			return {
+				systemPrompt: `${_event.systemPrompt}\n\nACTIVE PI-WORKFLOW BLOCKED\n\nDo not continue the workflow or call subagents. Report this runtime enforcement failure to the user: ${availability.error}`,
+			};
+		}
+		const promptContext = workflowAgentPromptContext();
+		if (promptContext.error) {
+			agentExecutionReady = false;
+			setCheckpointToolActive(false);
+			return {
+				systemPrompt: `${_event.systemPrompt}\n\nACTIVE PI-WORKFLOW BLOCKED\n\nDo not continue the workflow or call subagents. Live agent availability could not be read safely: ${promptContext.error}`,
+			};
+		}
+		agentExecutionReady = true;
+		executableAgents = new Set(executableDelegateAgentNames(activeSnapshot, promptContext.enabledAgents));
 		setCheckpointToolActive(true);
-		return { systemPrompt: `${_event.systemPrompt}\n\n${buildCurrentStepProtocol(activeSnapshot)}` };
+		return { systemPrompt: `${_event.systemPrompt}\n\n${buildCurrentStepProtocol(activeSnapshot, promptContext.enabledAgents, promptContext.knownAgents)}` };
 	});
 
 	pi.registerTool({
@@ -162,6 +373,7 @@ export default function piWorkflowExtension(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use workflow_checkpoint only when an active pi-workflow run instructs you to checkpoint the current step.",
 			"workflow_checkpoint must include an allowed outcome for the current step and all required text artifact outputs.",
+			"Never emit workflow_checkpoint in parallel with subagent or other tool calls; checkpoint only after every current-step tool result is available.",
 		],
 		parameters: Type.Object({
 			step: Type.Optional(Type.String({ description: "Current step id. Optional, but used for stale-checking when provided." })),
@@ -177,15 +389,23 @@ export default function piWorkflowExtension(pi: ExtensionAPI): void {
 			if (!activeSnapshot || !isActiveStatus(activeSnapshot.status)) throw new Error("No active pi-workflow run. Start one with /workflow run <name> <goal>.");
 			const result = applyCheckpoint(activeSnapshot, params as CheckpointParams);
 			setSnapshot(ctx, result.snapshot, result.events);
+			const promptContext = workflowAgentPromptContext();
+			agentExecutionReady = !promptContext.error;
+			executableAgents = promptContext.error
+				? new Set()
+				: new Set(executableDelegateAgentNames(result.snapshot, promptContext.enabledAgents));
+			const continuation = promptContext.error
+				? `Agent-aware continuation instructions are withheld until live availability can be read safely. ${promptContext.error}`
+				: buildContinuationInstructions(result.snapshot, promptContext.enabledAgents, promptContext.knownAgents);
 			if (result.finished) {
 				setCheckpointToolActive(false);
 				return {
-					content: [{ type: "text", text: `${result.message}\n\n${buildContinuationInstructions(result.snapshot)}` }],
+					content: [{ type: "text", text: `${result.message}\n\n${continuation}` }],
 					details: { snapshot: result.snapshot },
 				};
 			}
 			return {
-				content: [{ type: "text", text: `${result.message}\n\n${buildContinuationInstructions(result.snapshot)}` }],
+				content: [{ type: "text", text: `${result.message}\n\n${continuation}` }],
 				details: { snapshot: result.snapshot },
 			};
 		},
@@ -272,8 +492,9 @@ export default function piWorkflowExtension(pi: ExtensionAPI): void {
 					const goal = parts.join(" ").trim();
 					if (!name || !goal) throw new Error("/workflow run requires <name> <goal>.");
 					if (activeSnapshot && isActiveStatus(activeSnapshot.status)) throw new Error(`A workflow is already active (${activeSnapshot.workflowName}, ${activeSnapshot.status}). Pause/cancel/complete it before starting another.`);
-					const { entry, diagnostics } = findWorkflow(ctx, name);
-					if (!entry) throw new Error(`Workflow not found or invalid: ${name}\n${diagnostics}`);
+					const found = findWorkflow(ctx, name);
+					if (!found.entry) throw new Error(`Workflow not found or invalid: ${name}\n${found.diagnostics}`);
+					const entry = found.entry;
 					const snapshot = createRunSnapshot({ workflow: entry.workflow, workflowPath: entry.path, workflowSource: entry.source, workflowHash: entry.hash, goal });
 					setSnapshot(ctx, snapshot, [startEvent(snapshot)]);
 					ctx.ui.notify(`Started workflow ${name}.`, "info");

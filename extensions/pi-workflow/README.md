@@ -119,7 +119,9 @@ delegate:
   guidance: Give each scout a distinct responsibility for {{input.goal}}.
 ```
 
-Delegation constraints are prompt guidance by design: `pi-workflow` does not inspect or block `subagent` calls. When `pi-subagents` is loaded with its read-only `listAgents()` bridge, referenced agent names are validated against registered subagents.
+Delegate workflow validation requires the live `pi-subagents` bridge. Registered-but-user-disabled profiles and unknown names are distinct validation errors, and `/workflow run` never bypasses either error. Active runs keep their pinned workflow definition. During a delegate step, `pi-workflow` applies an extension-owned temporary allowlist through the runtime bridge; this is a separate layer from the user's session-level `/agents` choices. Users may change those choices while a workflow is active, and the choices survive transition, pause, cancel, completion, restore, or shutdown. A failed restriction update blocks delegate execution; a failed clear remains pending and is retried without overwriting user state.
+
+The current-step prompt re-reads effective availability every turn and omits free-form or structured instructions that would advertise unavailable profiles. Fixed task lists are not run partially. Dynamic `minCalls`/`maxCalls` count calls rather than distinct profiles, so repeated fan-out calls to one enabled profile remain valid.
 
 ### Templates
 

@@ -4,19 +4,12 @@
  * Appends an "Orchestration Mode" layer to the system prompt on every turn via
  * the `before_agent_start` hook, steering the agent to delegate work to
  * pi-subagents profiles instead of doing it inline. The layer includes a
- * Subagent Registry table auto-generated once per session from the frontmatter
- * of the agent .md files in extensions/pi-subagents/agents/.
+ * Subagent Registry table generated from pi-subagents' live bridge so
+ * session-disabled and dynamically registered profiles are reflected each turn.
  *
  * On by default. Use /orchestrator to toggle the layer for the session.
  */
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
-// ── Config ─────────────────────────────────────────────────────────────
-
-const EXT_DIR = path.dirname(new URL(import.meta.url).pathname);
-const AGENTS_DIR = path.join(path.dirname(EXT_DIR), "pi-subagents", "agents");
 
 // ── Static Prompt Sections ─────────────────────────────────────────────
 
@@ -50,8 +43,8 @@ the work yourself; you delegate it to subagents via the \`subagent\` tool.
 - **Parallelize by default.** If subtasks are independent, emit multiple
   \`subagent\` calls in the same turn — they run in parallel. Only serialize
   when one subtask's output feeds another.
-- **Match the agent to the job.** Use the registry below. Don't send research
-  to a worker or edits to a scout.
+- **Match the agent to the job.** Use the live registry below and each listed
+  profile's description/tools. Do not reference profiles absent from it.
 - **Do it yourself only when trivial.** Single-file reads, one-line edits,
   and direct answers to questions don't need delegation. Everything else
   does.
@@ -75,12 +68,18 @@ Deliverable: <exact artifact or report, including required evidence>
 Stopping condition: <completion test and when to stop for a blocker or exhausted budget>
 \`\`\``;
 
-const DELEGATION_PATTERNS = `### Delegation Patterns
-
-- **Explore → Act:** scout/researcher to map the problem → worker to implement.
-- **Fan out:** multiple scouts/workers on independent areas in one turn.
-- **Implement → Verify:** worker/experimenter → qa or evaluator to check.
-- **External knowledge:** web-researcher for anything outside the codebase.`;
+function buildDelegationPatterns(entries: readonly AgentEntry[]): string {
+	const enabled = new Set(entries.map((entry) => entry.name));
+	const patterns: string[] = [];
+	if (enabled.has("scout") && enabled.has("worker")) patterns.push("- **Explore → Act:** scout maps the problem → worker implements.");
+	if (enabled.has("researcher") && enabled.has("worker")) patterns.push("- **Research → Act:** researcher investigates options → worker implements.");
+	if (enabled.has("worker")) patterns.push("- **Fan out:** use multiple workers on independent areas in one turn.");
+	if (enabled.has("qa") || enabled.has("evaluator")) {
+		patterns.push(`- **Verify:** use ${enabled.has("qa") ? "qa" : "evaluator"} to check non-trivial work.`);
+	}
+	if (enabled.has("web-researcher")) patterns.push("- **External knowledge:** use web-researcher for anything outside the codebase.");
+	return patterns.length > 0 ? `### Delegation Patterns\n\n${patterns.join("\n")}` : "";
+}
 
 // ── Subagent Registry ──────────────────────────────────────────────────
 
@@ -90,56 +89,46 @@ interface AgentEntry {
 	tools: string;
 }
 
-/**
- * Minimal YAML-ish frontmatter parser: extracts flat `key: value` fields from
- * the `---` block at the top of a markdown file. Dependency-free by design —
- * agent frontmatter is flat, so a full YAML parser would be overkill.
- */
-function parseFrontmatter(content: string): Record<string, string> {
-	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-	if (!match) return {};
-	const fields: Record<string, string> = {};
-	for (const line of match[1].split(/\r?\n/)) {
-		const kv = line.match(/^([\w-]+)\s*:\s*(.*)$/);
-		if (kv) fields[kv[1]] = kv[2].trim();
-	}
-	return fields;
+interface SubagentsBridge {
+	listAgents?: () => Array<{
+		name: string;
+		description?: string;
+		tools?: string[];
+		enabled?: boolean;
+	}>;
 }
 
-let registryCache: AgentEntry[] | undefined;
+interface WorkflowBridge {
+	isRunning?: () => boolean;
+}
 
-/**
- * Parse every agent .md file in the pi-subagents agents/ directory. Result is
- * cached after the first read — agent files don't change mid-session, and this
- * runs on the before_agent_start path which fires every turn.
- */
-function loadRegistry(): AgentEntry[] {
-	if (registryCache) return registryCache;
-	const entries: AgentEntry[] = [];
+export function isWorkflowRunning(): boolean {
+	const bridge = (globalThis as any).__pi_workflow as WorkflowBridge | undefined;
+	if (!bridge?.isRunning) return false;
 	try {
-		if (fs.existsSync(AGENTS_DIR)) {
-			for (const entry of fs.readdirSync(AGENTS_DIR)) {
-				if (!entry.endsWith(".md")) continue;
-				try {
-					const content = fs.readFileSync(path.join(AGENTS_DIR, entry), "utf-8");
-					const frontmatter = parseFrontmatter(content);
-					if (!frontmatter.name) continue;
-					entries.push({
-						name: frontmatter.name,
-						description: frontmatter.description || "",
-						tools: frontmatter.tools || "",
-					});
-				} catch {
-					// Skip individual unparsable files
-				}
-			}
-		}
+		return bridge.isRunning();
 	} catch {
-		// Missing/unreadable directory — the table is omitted gracefully
+		// A present but failing workflow bridge should not add a potentially
+		// conflicting orchestration layer until workflow ownership is known.
+		return true;
 	}
-	entries.sort((a, b) => a.name.localeCompare(b.name));
-	registryCache = entries;
-	return entries;
+}
+
+export function loadRegistry(): AgentEntry[] {
+	const bridge = (globalThis as any).__pi_subagents as SubagentsBridge | undefined;
+	if (!bridge?.listAgents) return [];
+	try {
+		return bridge.listAgents()
+			.filter((agent) => agent.enabled !== false && !!agent.name)
+			.map((agent) => ({
+				name: agent.name,
+				description: agent.description ?? "",
+				tools: agent.tools?.join(", ") ?? "",
+			}))
+			.sort((a, b) => a.name.localeCompare(b.name));
+	} catch {
+		return [];
+	}
 }
 
 function renderRegistryTable(entries: AgentEntry[]): string {
@@ -152,19 +141,18 @@ function renderRegistryTable(entries: AgentEntry[]): string {
 	return rows.join("\n");
 }
 
-let layerCache: string | undefined;
-
-/** Build the full prompt layer once, then serve from cache. */
-function buildLayer(): string {
-	if (layerCache !== undefined) return layerCache;
+/** Build the layer from live metadata to avoid stale availability caches. */
+export function buildLayer(): string {
 	const parts = [STATIC_SECTION];
 	const entries = loadRegistry();
 	if (entries.length > 0) {
-		parts.push(`### Subagent Registry\n\n${renderRegistryTable(entries)}`);
+		parts.push(`### Enabled Subagent Registry\n\n${renderRegistryTable(entries)}`);
+	} else {
+		parts.push("### Enabled Subagent Registry\n\nNo subagent profiles are currently enabled. Do not call the `subagent` tool until the user enables one with `/agents`.");
 	}
-	parts.push(DELEGATION_PATTERNS);
-	layerCache = parts.join("\n\n");
-	return layerCache;
+	const patterns = buildDelegationPatterns(entries);
+	if (patterns) parts.push(patterns);
+	return parts.join("\n\n");
 }
 
 // ── Extension ─────────────────────────────────────────────────────────
@@ -184,7 +172,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		if (!enabled) return undefined;
+		if (!enabled || isWorkflowRunning()) return undefined;
 		return { systemPrompt: event.systemPrompt + "\n\n" + buildLayer() };
 	});
 }

@@ -9,19 +9,27 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, getMarkdownTheme, parseFrontmatter, truncateHead, withFileMutationQueue, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, getMarkdownTheme, getSettingsListTheme, parseFrontmatter, truncateHead, withFileMutationQueue, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { Container, fuzzyFilter, getKeybindings, Input, Markdown, type SelectItem, SelectList, Spacer, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, fuzzyFilter, getKeybindings, Input, Markdown, type SelectItem, SelectList, type SettingItem, SettingsList, Spacer, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	canonicalModelRef,
+	clearAgentAvailabilityOverride,
 	clearAgentOverride,
+	clearAllAgentAvailabilityOverrides,
 	clearAllAgentOverrides,
+	clearTemporaryAgentRestriction,
 	DEFAULT_AGENT_MODEL,
 	DEFAULT_AGENT_THINKING,
+	isAgentEnabled,
+	isAgentTemporarilyRestricted,
+	isAgentUserEnabled,
 	resolveEffectiveAgentSettings,
 	resolveModelRef,
+	setAgentEnabled,
 	setAgentOverride,
+	setTemporaryAgentRestriction,
 	type AgentEffectiveSettings,
 } from "./settings.ts";
 
@@ -39,7 +47,8 @@ export interface AgentConfig {
 	 * If this agent has the `subagent` tool, restrict which agents it may spawn.
 	 * Passed to the child pi process via `PI_SUBAGENT_ALLOWED` so the child's
 	 * subagents extension filters its own registry before exposing it to the LLM.
-	 * `undefined` means no restriction (child sees every registered agent).
+	 * `undefined` means no profile restriction; session-disabled profiles are
+	 * still removed before this list is passed to a child process.
 	 */
 	subagentAgents?: string[];
 }
@@ -52,6 +61,12 @@ export interface AgentMetadata {
 	thinking: string;
 	filePath: string;
 	subagentAgents?: string[];
+	/** Effective runtime availability after user choices and temporary restrictions. */
+	enabled: boolean;
+	/** The user's session-level /agents choice, unaffected by temporary restrictions. */
+	userEnabled: boolean;
+	/** Whether an extension-owned temporary restriction currently excludes this profile. */
+	temporarilyRestricted: boolean;
 }
 
 interface ToolEvent {
@@ -100,6 +115,7 @@ interface AgentResult {
 	exitCode: number;
 	progress: AgentProgress;
 	model?: string;
+	modelName?: string;
 	contextWindow?: number;
 	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number };
 }
@@ -161,25 +177,56 @@ let agents: AgentConfig[] = [];
 
 // Read once at module load. If we're a child subagent process whose parent
 // pinned an allowlist, we silently ignore any agent (built-in OR registered
-// later by a third-party extension) that isn't in the list.
+// later by a third-party extension) that isn't in the list. The marker lets
+// an explicitly empty list mean "allow none" without changing the historical
+// meaning of an empty PI_SUBAGENT_ALLOWED value supplied by a user's shell.
+const SUBAGENT_ALLOWLIST_SET_ENV = "PI_SUBAGENT_ALLOWLIST_SET";
 const SUBAGENT_ALLOWLIST: string[] | undefined = (() => {
 	const raw = process.env.PI_SUBAGENT_ALLOWED;
-	if (!raw) return undefined;
-	const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
-	return list.length > 0 ? list : undefined;
+	const explicitlySet = process.env[SUBAGENT_ALLOWLIST_SET_ENV] === "1";
+	if (!raw && !explicitlySet) return undefined;
+	const list = (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+	return list.length > 0 || explicitlySet ? list : undefined;
 })();
+
+let showFullSubagentErrors = false;
+const subagentErrorInvalidateCallbacks = new Set<() => void>();
+export function getShowFullSubagentErrors(): boolean {
+	return showFullSubagentErrors;
+}
+export function setShowFullSubagentErrors(value: boolean): void {
+	showFullSubagentErrors = value;
+	for (const cb of subagentErrorInvalidateCallbacks) {
+		try {
+			cb();
+		} catch {}
+	}
+}
+export function toggleShowFullSubagentErrors(): boolean {
+	showFullSubagentErrors = !showFullSubagentErrors;
+	for (const cb of subagentErrorInvalidateCallbacks) {
+		try {
+			cb();
+		} catch {}
+	}
+	return showFullSubagentErrors;
+}
 
 export function registerAgent(config: AgentConfig): void {
 	if (SUBAGENT_ALLOWLIST && !SUBAGENT_ALLOWLIST.includes(config.name)) return;
 	if (agents.find((a) => a.name === config.name)) {
 		throw new Error(`Agent already registered: ${config.name}`);
 	}
+	// Registration has no persistent availability field: a newly registered
+	// profile always starts enabled in this runtime.
+	clearAgentAvailabilityOverride(config.name);
 	agents.push(config);
 }
 
 export function unregisterAgent(name: string): void {
 	agents = agents.filter((a) => a.name !== name);
 	clearAgentOverride(name);
+	clearAgentAvailabilityOverride(name);
 }
 
 export function listAgents(): AgentMetadata[] {
@@ -191,12 +238,57 @@ export function listAgents(): AgentMetadata[] {
 		thinking: agent.thinking,
 		filePath: agent.filePath,
 		subagentAgents: agent.subagentAgents ? [...agent.subagentAgents] : undefined,
+		enabled: isAgentEnabled(agent.name),
+		userEnabled: isAgentUserEnabled(agent.name),
+		temporarilyRestricted: isAgentTemporarilyRestricted(agent.name),
 	}));
 }
 
 // Expose registration functions globally so other extensions loaded via jiti
 // (which creates separate module instances) can access the shared agents array.
-(globalThis as any).__pi_subagents = { registerAgent, unregisterAgent, listAgents };
+// User availability and extension-owned restrictions are separate layers so a
+// workflow can constrain execution without overwriting /agents choices.
+let availabilityChanged: ((name: string, enabled: boolean) => void) | undefined;
+
+function effectiveAvailabilitySnapshot(): Map<string, boolean> {
+	return new Map(agents.map((agent) => [agent.name, isAgentEnabled(agent.name)]));
+}
+
+function emitEffectiveAvailabilityChanges(before: ReadonlyMap<string, boolean>): void {
+	for (const agent of agents) {
+		const enabled = isAgentEnabled(agent.name);
+		if (before.get(agent.name) !== enabled) availabilityChanged?.(agent.name, enabled);
+	}
+}
+
+(globalThis as any).__pi_subagents = {
+	registerAgent,
+	unregisterAgent,
+	listAgents,
+	setAgentEnabled: (name: string, enabled: boolean): boolean => {
+		if (!agents.some((agent) => agent.name === name)) return false;
+		const before = effectiveAvailabilitySnapshot();
+		setAgentEnabled(name, enabled);
+		emitEffectiveAvailabilityChanges(before);
+		return true;
+	},
+	setTemporaryAgentRestriction: (owner: string, allowedAgents: readonly string[]): boolean => {
+		if (typeof owner !== "string" || !owner.trim() || !Array.isArray(allowedAgents)) return false;
+		const knownAgents = new Set(agents.map((agent) => agent.name));
+		if (allowedAgents.some((name) => typeof name !== "string" || !knownAgents.has(name))) return false;
+		const before = effectiveAvailabilitySnapshot();
+		setTemporaryAgentRestriction(owner, allowedAgents);
+		emitEffectiveAvailabilityChanges(before);
+		return true;
+	},
+	clearTemporaryAgentRestriction: (owner: string): boolean => {
+		if (typeof owner !== "string" || !owner.trim()) return false;
+		const before = effectiveAvailabilitySnapshot();
+		clearTemporaryAgentRestriction(owner);
+		emitEffectiveAvailabilityChanges(before);
+		return true;
+	},
+};
 
 function loadAgents(): AgentConfig[] {
 	const agents: AgentConfig[] = [];
@@ -264,6 +356,28 @@ function formatContextUsage(tokens: number, contextWindow: number | undefined): 
 	return `${pct.toFixed(1)}%/${maxStr}`;
 }
 
+function formatTpsValue(outputTokens: number, durationMs: number): string | undefined {
+	if (!outputTokens || !durationMs || durationMs < 1) return undefined;
+	const tps = outputTokens / (durationMs / 1000);
+	if (!Number.isFinite(tps) || tps <= 0) return undefined;
+	const value = tps < 10 ? tps.toFixed(1) : tps.toFixed(0);
+	return `${value} tok/s`;
+}
+
+function formatProviderDisplay(model: string | undefined, modelName: string | undefined): string | undefined {
+	if (!model) return undefined;
+	const routingProvider = model.split("/")[0]?.trim();
+	if (!routingProvider) return undefined;
+	const inference = modelName ? extractInferenceProvider(modelName) : undefined;
+	const via = formatInferenceProvider(inference, routingProvider);
+	if (via) {
+		// via is "via <inference>" — strip prefix and reformat as "routing → inference" to match picker clarity
+		const inferenceOnly = via.replace(/^via\s+/, "");
+		return `${routingProvider} → ${inferenceOnly}`;
+	}
+	return routingProvider;
+}
+
 function formatToolPreview(name: string, args: Record<string, unknown>): string {
 	switch (name) {
 		case "bash":
@@ -329,11 +443,101 @@ function truncLine(text: string, maxWidth: number): string {
 
 // ── Subagent Execution ────────────────────────────────────────────────
 
-export type SubagentRunSettings = Pick<AgentEffectiveSettings, "model" | "thinking">;
+export type SubagentRunSettings = Pick<AgentEffectiveSettings, "model" | "thinking"> & { modelName?: string };
 
 export function appendSubagentModelThinkingArgs(args: string[], settings: SubagentRunSettings): void {
 	args.push("--model", settings.model);
 	args.push("--thinking", settings.thinking);
+}
+
+/**
+ * Compute the registry restriction inherited by a nested subagent process.
+ * A profile allowlist remains authoritative, while session-disabled profiles
+ * are removed from it. Unrestricted profiles only need an env restriction when
+ * at least one currently registered profile is disabled.
+ */
+export function resolveNestedSubagentAllowlist(
+	agent: Pick<AgentConfig, "tools" | "subagentAgents">,
+	agentList: readonly Pick<AgentConfig, "name">[] = agents,
+): string[] | undefined {
+	if (!agent.tools.includes("subagent")) return undefined;
+
+	const enabledNames = agentList.filter((entry) => isAgentEnabled(entry.name)).map((entry) => entry.name);
+	const enabledSet = new Set(enabledNames);
+	if (agent.subagentAgents !== undefined) {
+		return agent.subagentAgents.filter((name) => enabledSet.has(name));
+	}
+	return enabledNames.length === agentList.length ? undefined : enabledNames;
+}
+
+const NESTED_AGENT_GUIDANCE_START = "<!-- pi-subagents:dynamic-guidance:start -->";
+const NESTED_AGENT_GUIDANCE_END = "<!-- pi-subagents:dynamic-guidance:end -->";
+const NESTED_AGENT_PROFILE_GUIDANCE = /<!-- pi-subagents:profile:([A-Za-z0-9._-]+):start -->\s*([\s\S]*?)\s*<!-- pi-subagents:profile:\1:end -->/g;
+
+function renderNestedAgentGuidance(
+	allowedNames: readonly string[],
+	agentList: readonly Pick<AgentConfig, "name" | "description">[],
+): string {
+	const agentsByName = new Map(agentList.map((entry) => [entry.name, entry]));
+	const seen = new Set<string>();
+	const allowedAgents: Array<Pick<AgentConfig, "name" | "description">> = [];
+	for (const name of allowedNames) {
+		const entry = agentsByName.get(name);
+		if (entry && !seen.has(name)) {
+			seen.add(name);
+			allowedAgents.push(entry);
+		}
+	}
+
+	if (allowedAgents.length === 0) {
+		return [
+			"## Nested subagents",
+			"No nested subagent profiles are available in this process. Do not call the `subagent` tool.",
+		].join("\n\n");
+	}
+
+	const profiles = allowedAgents.map((entry) => {
+		const description = entry.description.replace(/\s+/g, " ").trim();
+		return `- ${JSON.stringify(entry.name)}${description ? ` — ${description}` : ""}`;
+	});
+	return [
+		"## Nested subagents",
+		"Only the following profiles are available to the `subagent` tool in this process:",
+		profiles.join("\n"),
+		"Use only these exact names in the `agent` field. Profiles not listed here are unavailable. Give each child all necessary context, and use parallel calls only for independent work.",
+	].join("\n\n");
+}
+
+/**
+ * Replace an explicitly structured registry and omit only profile-specific
+ * sections marked for unavailable agents. Unmarked role prose is preserved;
+ * profiles without a registry marker receive the authoritative live registry
+ * as an appended section.
+ */
+function buildNestedAgentSystemPrompt(
+	agent: Pick<AgentConfig, "tools" | "systemPrompt">,
+	allowedNames: readonly string[],
+	agentList: readonly Pick<AgentConfig, "name" | "description">[] = agents,
+): string {
+	if (!agent.tools.includes("subagent")) return agent.systemPrompt;
+
+	const allowedSet = new Set(allowedNames);
+	const filteredPrompt = agent.systemPrompt.replace(
+		NESTED_AGENT_PROFILE_GUIDANCE,
+		(_block, name: string, body: string) => allowedSet.has(name) ? body : "",
+	);
+	const guidance = renderNestedAgentGuidance(allowedNames, agentList);
+	const start = filteredPrompt.indexOf(NESTED_AGENT_GUIDANCE_START);
+	const end = start >= 0
+		? filteredPrompt.indexOf(NESTED_AGENT_GUIDANCE_END, start + NESTED_AGENT_GUIDANCE_START.length)
+		: -1;
+	if (start >= 0 && end >= 0) {
+		const before = filteredPrompt.slice(0, start).trimEnd();
+		const after = filteredPrompt.slice(end + NESTED_AGENT_GUIDANCE_END.length).trimStart();
+		return [before, guidance, after].filter(Boolean).join("\n\n") + "\n";
+	}
+
+	return `${filteredPrompt.trimEnd()}\n\n${guidance}\n`;
 }
 
 async function buildPiArgs(
@@ -341,7 +545,7 @@ async function buildPiArgs(
 	task: string,
 	cwd: string,
 	settings: SubagentRunSettings,
-): Promise<{ args: string[]; tempDir: string; childEnv: NodeJS.ProcessEnv | undefined }> {
+): Promise<{ args: string[]; tempDir: string; promptPath: string }> {
 	const piBin = resolvePiBinary();
 	const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-sub-"));
 
@@ -397,17 +601,7 @@ async function buildPiArgs(
 		args.push(`Task: ${task}`);
 	}
 
-	// If this agent is allowed to spawn subagents AND we want to restrict which
-	// ones, pass the allowlist down via env. The child pi process loads this
-	// extension and filters its agent registry before exposing tool descriptions
-	// to the LLM — so the child literally cannot request an agent outside the
-	// allowlist (the name isn't in its prompt).
-	let childEnv: NodeJS.ProcessEnv | undefined;
-	if (agent.tools.includes("subagent") && agent.subagentAgents && agent.subagentAgents.length > 0) {
-		childEnv = { ...process.env, PI_SUBAGENT_ALLOWED: agent.subagentAgents.join(",") };
-	}
-
-	return { args: [piBin.command, ...args], tempDir, childEnv };
+	return { args: [piBin.command, ...args], tempDir, promptPath };
 }
 
 function extractTextFromContent(content: unknown): string {
@@ -453,6 +647,30 @@ function extractToolArgsPreview(args: Record<string, unknown>): string {
 	return cap(flatten(JSON.stringify(args)));
 }
 
+function workflowAgentBlockMessage(agentName: string): string | undefined {
+	const bridge = (globalThis as any).__pi_workflow as {
+		canRunAgent?: (name: string) => boolean | { allowed: boolean; reason?: string };
+	} | undefined;
+	if (!bridge?.canRunAgent) return undefined;
+	try {
+		const decision = bridge.canRunAgent(agentName);
+		if (decision === false) return `Agent ${agentName} is blocked by the active workflow.`;
+		if (typeof decision === "object" && !decision.allowed) {
+			return decision.reason ?? `Agent ${agentName} is blocked by the active workflow.`;
+		}
+		return undefined;
+	} catch (error) {
+		return `Agent ${agentName} is blocked because the active workflow policy failed: ${error instanceof Error ? error.message : String(error)}`;
+	}
+}
+
+function agentUnavailableMessage(agentName: string): string {
+	if (!isAgentUserEnabled(agentName)) {
+		return `Agent is disabled for this session: ${agentName}. Re-enable it with /agents enable ${agentName}.`;
+	}
+	return `Agent is temporarily unavailable due to an active runtime restriction: ${agentName}.`;
+}
+
 async function runSubagent(
 	agent: AgentConfig,
 	task: string,
@@ -461,9 +679,25 @@ async function runSubagent(
 	signal: AbortSignal | undefined,
 	onUpdate?: (progress: AgentProgress, usage: AgentResult["usage"]) => void,
 ): Promise<AgentResult> {
-	const { args, tempDir, childEnv } = await buildPiArgs(agent, task, cwd, settings);
+	const { args, tempDir, promptPath } = await buildPiArgs(agent, task, cwd, settings);
 	const command = args[0];
 	const spawnArgs = args.slice(1);
+
+	const cleanupAndThrow = (message: string): never => {
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {}
+		throw new Error(message);
+	};
+	const assertSpawnAllowed = (): void => {
+		if (signal?.aborted) cleanupAndThrow(`Subagent call was cancelled before ${agent.name} could spawn.`);
+		if (agents.find((entry) => entry.name === agent.name) !== agent) {
+			cleanupAndThrow(`Unknown agent: ${agent.name}. The profile was unregistered or replaced before it could spawn.`);
+		}
+		const workflowBlock = workflowAgentBlockMessage(agent.name);
+		if (workflowBlock) cleanupAndThrow(workflowBlock);
+		if (!isAgentEnabled(agent.name)) cleanupAndThrow(agentUnavailableMessage(agent.name));
+	};
 
 	const result: AgentResult = {
 		agent: agent.name,
@@ -471,6 +705,7 @@ async function runSubagent(
 		output: "",
 		exitCode: 0,
 		model: settings.model,
+		modelName: settings.modelName,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 		progress: {
 			agent: agent.name,
@@ -487,12 +722,44 @@ async function runSubagent(
 	const startTime = Date.now();
 	const progress = result.progress;
 
+	// buildPiArgs performs async file I/O. Revalidate synchronously after that
+	// work and immediately before calling spawn so a disable/unregister that
+	// happened during preparation cannot launch a stale profile.
+	assertSpawnAllowed();
+
 	const fireUpdate = throttle(() => {
 		progress.durationMs = Date.now() - startTime;
 		onUpdate?.(progress, result.usage);
 	}, 150);
 
 	const exitCode = await new Promise<number>((resolve) => {
+		assertSpawnAllowed();
+		// Compute nested visibility at the same synchronous spawn boundary as the
+		// selected-profile check so a just-disabled child cannot leak through a
+		// stale environment prepared during async temp-file work.
+		const nestedAllowlist = resolveNestedSubagentAllowlist(agent);
+		const effectiveNestedAgentNames = nestedAllowlist
+			?? agents.filter((entry) => isAgentEnabled(entry.name)).map((entry) => entry.name);
+		if (agent.tools.includes("subagent")) {
+			try {
+				// Keep the prompt and inherited environment on the same synchronous
+				// spawn-boundary snapshot so neither can advertise a just-disabled agent.
+				fs.writeFileSync(
+					promptPath,
+					buildNestedAgentSystemPrompt(agent, effectiveNestedAgentNames),
+					{ encoding: "utf-8", mode: 0o600 },
+				);
+			} catch (error) {
+				cleanupAndThrow(`Failed to prepare nested guidance for ${agent.name}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		const childEnv: NodeJS.ProcessEnv | undefined = nestedAllowlist === undefined
+			? undefined
+			: {
+				...process.env,
+				PI_SUBAGENT_ALLOWED: nestedAllowlist.join(","),
+				[SUBAGENT_ALLOWLIST_SET_ENV]: "1",
+			};
 		const proc = spawn(command, spawnArgs, {
 			cwd,
 			stdio: ["ignore", "pipe", "pipe"],
@@ -838,19 +1105,33 @@ function renderAgentProgress(
 	if (r.usage.cacheRead) usageParts.push(theme.fg("dim", `R${formatTokens(r.usage.cacheRead)}`));
 	if (r.usage.cacheWrite) usageParts.push(theme.fg("dim", `W${formatTokens(r.usage.cacheWrite)}`));
 	if (r.usage.cost) usageParts.push(theme.fg("dim", `$${r.usage.cost.toFixed(3)}`));
+	const providerDisplay = formatProviderDisplay(r.model, r.modelName);
+	if (providerDisplay) usageParts.push(theme.fg("dim", providerDisplay));
 	if (prog.tokens > 0) {
 		const ctxStr = formatContextUsage(prog.tokens, r.contextWindow);
 		const pct = r.contextWindow ? (prog.tokens / r.contextWindow) * 100 : 0;
 		const coloredCtx = pct > 90 ? theme.fg("error", ctxStr) : pct > 70 ? theme.fg("warning", ctxStr) : theme.fg("dim", ctxStr);
 		usageParts.push(coloredCtx);
 	}
+	const tpsStr = formatTpsValue(r.usage.output, prog.durationMs);
+	if (tpsStr) usageParts.push(theme.fg("dim", tpsStr));
 	if (usageParts.length) {
 		addLine(usageParts.join(" "));
 	}
 
-	// Error
+	// Error — toggleable via Ctrl+E (showFullSubagentErrors)
 	if (prog.error) {
-		addLine(theme.fg("error", `Error: ${prog.error}`));
+		if (showFullSubagentErrors) {
+			const errorLines = prog.error.split("\n");
+			for (let i = 0; i < errorLines.length; i++) {
+				const prefix = i === 0 ? "Error: " : "  ";
+				c.addChild(new Text(indent + theme.fg("error", prefix + errorLines[i]), 0, 0));
+			}
+			c.addChild(new Text(indent + theme.fg("dim", "(Ctrl+E to collapse)"), 0, 0));
+		} else {
+			const hint = theme.fg("dim", " (Ctrl+E to expand)");
+			addLine(theme.fg("error", `Error: ${prog.error}`) + hint);
+		}
 	}
 
 	return c;
@@ -950,28 +1231,83 @@ async function getModelCatalog(ctx: ExtensionContext): Promise<Model<Api>[]> {
 	return ctx.modelRegistry.getAll();
 }
 
+function agentAvailabilityStatus(agentName: string): string {
+	if (!isAgentUserEnabled(agentName)) return "disabled";
+	if (isAgentTemporarilyRestricted(agentName)) return "enabled; temporarily unavailable";
+	return "enabled";
+}
+
 export function buildAgentItems(agentList: readonly AgentConfig[], models: readonly Model<Api>[]): SelectItem[] {
-	return agentList.map((agent) => {
+	if (agentList.length === 0) return [];
+	const agentItems: SelectItem[] = agentList.map((agent) => {
 		const effective = resolveEffectiveAgentSettings(agent, models);
 		return {
 			value: agent.name,
 			label: agent.name,
-			description: [
-				agent.description,
-				formatEffectiveSettings(effective),
-				`tools: ${agent.tools.join(", ") || "none"}`,
-			].filter(Boolean).join(" · "),
+			description: `${agentAvailabilityStatus(agent.name)} · ${formatEffectiveSettings(effective)}`,
 		};
 	});
+	const allItem: SelectItem = {
+		value: "__all__",
+		label: "all",
+		description: `Apply to all ${agentList.length} agents`,
+	};
+	return [allItem, ...agentItems];
+}
+
+export function buildAgentsMenuItems(agentList: readonly AgentConfig[]): SelectItem[] {
+	const selectedCount = agentList.filter((agent) => isAgentUserEnabled(agent.name)).length;
+	const availableCount = agentList.filter((agent) => isAgentEnabled(agent.name)).length;
+	const restrictionStatus = selectedCount === availableCount ? "" : ` · ${availableCount} currently available`;
+	return [
+		{
+			value: "availability",
+			label: "Availability",
+			description: `${selectedCount}/${agentList.length} agents enabled${restrictionStatus} · session only`,
+		},
+		{
+			value: "model-reasoning",
+			label: "Models & reasoning",
+			description: "Edit session-only model and reasoning overrides",
+		},
+	];
+}
+
+export function buildAgentAvailabilityItems(agentList: readonly AgentConfig[]): SettingItem[] {
+	return agentList.map((agent) => ({
+		id: agent.name,
+		label: agent.name,
+		description: `${agent.description || `Tools: ${agent.tools.join(", ") || "none"}`}${isAgentTemporarilyRestricted(agent.name) ? " · temporarily unavailable to the runtime" : ""}`,
+		currentValue: isAgentUserEnabled(agent.name) ? "enabled" : "disabled",
+		values: ["enabled", "disabled"],
+	}));
+}
+
+export function extractInferenceProvider(name: string): string | undefined {
+	const match = name.match(/\(([^)]+)\)\s*$/);
+	if (!match) return undefined;
+	const inference = match[1].split(":")[0].trim();
+	return inference ? inference : undefined;
+}
+
+export function formatInferenceProvider(inference: string | undefined, routingProvider: string): string | undefined {
+	if (!inference) return undefined;
+	const normalize = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, "");
+	if (normalize(inference) === normalize(routingProvider)) return undefined;
+	return `via ${inference}`;
 }
 
 export function buildModelItems(models: readonly Model<Api>[]): SelectItem[] {
 	return models
-		.map((model) => ({
-			value: canonicalModelRef(model),
-			label: canonicalModelRef(model),
-			description: [model.name, formatModelContext(model.contextWindow)].filter(Boolean).join(" · "),
-		}))
+		.map((model) => {
+			const inference = extractInferenceProvider(model.name);
+			const via = formatInferenceProvider(inference, model.provider);
+			return {
+				value: canonicalModelRef(model),
+				label: canonicalModelRef(model),
+				description: [model.name, via, formatModelContext(model.contextWindow)].filter(Boolean).join(" · "),
+			};
+		})
 		.sort((a, b) => a.value.localeCompare(b.value));
 }
 
@@ -986,8 +1322,63 @@ export function buildThinkingItems(levels: readonly ModelThinkingLevel[]): Selec
 export function formatAgentsSummary(agentList: readonly AgentConfig[], models: readonly Model<Api>[]): string {
 	return agentList.map((agent) => {
 		const effective = resolveEffectiveAgentSettings(agent, models);
-		return `${agent.name}: ${formatEffectiveSettings(effective)} (${agent.tools.join(", ") || "no tools"})`;
+		return `${agent.name} [${agentAvailabilityStatus(agent.name)}]: ${formatEffectiveSettings(effective)} (${agent.tools.join(", ") || "no tools"})`;
 	}).join("\n");
+}
+
+export interface AgentAvailabilityCommandResult {
+	message: string;
+	level: "info" | "warning";
+}
+
+const AGENT_AVAILABILITY_USAGE = "Usage: /agents <enable|disable|toggle> <name|all>";
+
+export function applyAgentAvailabilityCommand(
+	rawArgs: string,
+	agentList: readonly Pick<AgentConfig, "name">[],
+): AgentAvailabilityCommandResult | undefined {
+	const input = rawArgs.trim();
+	if (!input) return undefined;
+
+	const parts = input.split(/\s+/);
+	const action = parts[0]?.toLowerCase();
+	const target = parts[1];
+	if (parts.length !== 2 || !target || (action !== "enable" && action !== "disable" && action !== "toggle")) {
+		return { message: AGENT_AVAILABILITY_USAGE, level: "warning" };
+	}
+
+	if (target.toLowerCase() === "all") {
+		for (const agent of agentList) {
+			const enabled = action === "toggle" ? !isAgentUserEnabled(agent.name) : action === "enable";
+			setAgentEnabled(agent.name, enabled);
+		}
+		const selectedCount = agentList.filter((agent) => isAgentUserEnabled(agent.name)).length;
+		const availableCount = agentList.filter((agent) => isAgentEnabled(agent.name)).length;
+		const restrictionStatus = availableCount === selectedCount ? "" : ` ${availableCount} are currently available after temporary restrictions.`;
+		return {
+			message: `Updated all ${agentList.length} agents for this session: ${selectedCount} enabled, ${agentList.length - selectedCount} disabled.${restrictionStatus}`,
+			level: "info",
+		};
+	}
+
+	const normalizedTarget = target.toLowerCase();
+	const agent = agentList.find((entry) => entry.name.toLowerCase() === normalizedTarget);
+	if (!agent) {
+		return {
+			message: `Unknown agent: ${target}. Registered agents: ${agentList.map((entry) => entry.name).join(", ") || "none"}.\n${AGENT_AVAILABILITY_USAGE}`,
+			level: "warning",
+		};
+	}
+
+	const enabled = action === "toggle" ? !isAgentUserEnabled(agent.name) : action === "enable";
+	setAgentEnabled(agent.name, enabled);
+	const restrictionStatus = enabled && isAgentTemporarilyRestricted(agent.name)
+		? " It remains temporarily unavailable to the runtime until the active restriction is cleared."
+		: "";
+	return {
+		message: `${agent.name} is now ${enabled ? "enabled" : "disabled"} for this session.${restrictionStatus}`,
+		level: "info",
+	};
 }
 
 export type AgentSettingsPickOptions = {
@@ -1019,6 +1410,49 @@ export async function runAgentSettingsWizard(options: {
 		footer: "↑↓ navigate · enter edit model/reasoning · esc close",
 	});
 	if (!agentItem) return false;
+
+	if (agentItem.value === "__all__") {
+		if (models.length === 0) {
+			notify?.("No models are currently available in the model registry", "warning");
+			return false;
+		}
+		const modelItem = await pick({
+			title: "Model for all agents",
+			items: buildModelItems(models),
+			currentValue: undefined,
+			footer: "type to fuzzy search · ↑↓ navigate · enter choose · esc cancel",
+			fuzzySearch: true,
+		});
+		if (!modelItem) return false;
+
+		const selectedModel = resolveModelRef(modelItem.value, models);
+		if (!selectedModel) {
+			notify?.(`Model is no longer available: ${modelItem.value}`, "warning");
+			return false;
+		}
+
+		const supportedThinkingLevels = getSupportedThinkingLevels(selectedModel);
+		const stagedThinking: ModelThinkingLevel = supportedThinkingLevels.includes("medium" as ModelThinkingLevel)
+			? "medium" as ModelThinkingLevel
+			: supportedThinkingLevels.includes("off")
+				? "off"
+				: (supportedThinkingLevels[0] ?? "off");
+		const thinkingItem = await pick({
+			title: `Reasoning for all agents (${canonicalModelRef(selectedModel)})`,
+			items: buildThinkingItems(supportedThinkingLevels),
+			currentValue: stagedThinking,
+		});
+		if (!thinkingItem) return false;
+
+		for (const agent of agentList) {
+			setAgentOverride(agent.name, {
+				model: canonicalModelRef(selectedModel),
+				thinking: thinkingItem.value as ModelThinkingLevel,
+			});
+		}
+		notify?.(`Updated all ${agentList.length} agents: ${canonicalModelRef(selectedModel)} · thinking: ${thinkingItem.value}`, "info");
+		return true;
+	}
 
 	const agent = agentList.find((entry) => entry.name === agentItem.value);
 	if (!agent) return false;
@@ -1074,10 +1508,61 @@ async function editAgentSettings(ctx: ExtensionContext, models: readonly Model<A
 	});
 }
 
+async function editAgentAvailability(
+	ctx: ExtensionContext,
+	onAvailabilityChanged?: (name: string, enabled: boolean) => void,
+): Promise<void> {
+	await ctx.ui.custom((tui, theme, _keybindings, done) => {
+		const items = buildAgentAvailabilityItems(agents);
+		const container = new Container();
+		container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+		container.addChild(new Text(theme.fg("accent", theme.bold("Agent Availability (current session)")), 1, 0));
+
+		const settingsList = new SettingsList(
+			items,
+			Math.min(Math.max(items.length, 1), 14),
+			getSettingsListTheme(),
+			(name, value) => {
+				const wasAvailable = isAgentEnabled(name);
+				setAgentEnabled(name, value === "enabled");
+				const available = isAgentEnabled(name);
+				if (wasAvailable !== available) onAvailabilityChanged?.(name, available);
+			},
+			() => done(undefined),
+			{ enableSearch: true },
+		);
+		container.addChild(settingsList);
+		container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+
+		return {
+			render: (width: number) => container.render(width),
+			invalidate: () => container.invalidate(),
+			handleInput: (data: string) => {
+				settingsList.handleInput(data);
+				tui.requestRender();
+			},
+		};
+	}, {
+		overlay: true,
+		overlayOptions: { width: "80%", minWidth: 50, maxHeight: "80%" },
+	});
+}
+
 // ── Extension ─────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
 	clearAllAgentOverrides();
+	clearAllAgentAvailabilityOverrides();
+	availabilityChanged = (name, enabled) => {
+		pi.events?.emit("pi-subagents:availability-changed", { name, enabled });
+	};
+	(pi as unknown as { registerShortcut?: ExtensionAPI["registerShortcut"] }).registerShortcut?.("ctrl+e", {
+		description: "Toggle subagent error details",
+		handler: (ctx) => {
+			const nowExpanded = toggleShowFullSubagentErrors();
+			ctx.ui.notify(nowExpanded ? "Subagent errors: expanded" : "Subagent errors: collapsed", "info");
+		},
+	});
 	const config = loadConfig();
 	const semaphore = new Semaphore(config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY);
 	agents = loadAgents();
@@ -1091,19 +1576,45 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("agents", {
-		description: "Preview available subagents and adjust session-only subagent models",
-		handler: async (_args, ctx) => {
+		description: "Manage session-only subagent availability, models, and reasoning",
+		handler: async (args, ctx) => {
 			if (agents.length === 0) {
-				ctx.ui.notify("No subagents are currently available", "warning");
+				ctx.ui.notify("No subagents are currently registered", "warning");
+				return;
+			}
+
+			const rawArgs = args ?? "";
+			const beforeAvailability = new Map(agents.map((agent) => [agent.name, isAgentEnabled(agent.name)]));
+			const commandResult = applyAgentAvailabilityCommand(rawArgs, agents);
+			if (commandResult) {
+				for (const agent of agents) {
+					const enabled = isAgentEnabled(agent.name);
+					if (beforeAvailability.get(agent.name) !== enabled) {
+						availabilityChanged?.(agent.name, enabled);
+					}
+				}
+				ctx.ui.notify(commandResult.message, commandResult.level);
+				return;
+			}
+
+			if (ctx.mode !== "tui") {
+				const models = await getModelCatalog(ctx);
+				ctx.ui.notify(`Registered agents:\n${formatAgentsSummary(agents, models)}`, "info");
+				return;
+			}
+
+			const route = await pickSelectItem(ctx, {
+				title: "Subagent Settings",
+				items: buildAgentsMenuItems(agents),
+				footer: "↑↓ navigate · enter open · esc close",
+			});
+			if (!route) return;
+			if (route.value === "availability") {
+				await editAgentAvailability(ctx, (name, enabled) => availabilityChanged?.(name, enabled));
 				return;
 			}
 
 			const models = await getModelCatalog(ctx);
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify(`Available agents:\n${formatAgentsSummary(agents, models)}`, "info");
-				return;
-			}
-
 			await editAgentSettings(ctx, models);
 		},
 	});
@@ -1116,7 +1627,8 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Run subagents for delegated tasks",
 		promptGuidelines: [
 			"Parallel tool calls are your primary parallelism mechanism — put multiple independent read/fetch/search calls in one function_calls block. Don't use subagents to parallelize simple I/O.",
-			"Use subagent to delegate *reasoning and decisions*: codebase exploration (scout), web research (web-researcher), campaign research (researcher), or isolated code changes (worker)",
+			"Use the subagent tool only with a profile currently advertised by live workflow/orchestrator guidance or returned by `/agents`; disabled profiles are unavailable.",
+			"Use subagent to delegate reasoning and decisions rather than simple I/O, and match each task to the enabled profile's description.",
 			"For multiple independent subagent tasks, emit multiple `subagent` tool calls in the same turn — they run in parallel automatically.",
 			"Subagents have NO context from the current conversation — include ALL necessary context in the task description",
 		],
@@ -1135,35 +1647,48 @@ export default function (pi: ExtensionAPI) {
 
 			const agent = agents.find((a) => a.name === params.agent);
 			if (!agent) {
-				const available = agents.map((a) => a.name).join(", ") || "none";
+				const available = agents.filter((entry) => isAgentEnabled(entry.name)).map((entry) => entry.name).join(", ") || "none";
 				throw new Error(`Unknown agent: ${params.agent}. Available agents: ${available}`);
 			}
+			const workflowBlock = workflowAgentBlockMessage(agent.name);
+			if (workflowBlock) throw new Error(workflowBlock);
+			if (!isAgentEnabled(agent.name)) throw new Error(agentUnavailableMessage(agent.name));
 
 			const effective = resolveEffectiveAgentSettings(agent, ctx.modelRegistry.getAll());
 			const contextWindow = effective.resolvedModel?.contextWindow;
+			const effectiveModelName = effective.resolvedModel?.name;
+			const effectiveSettings: SubagentRunSettings = { model: effective.model, thinking: effective.thinking, modelName: effectiveModelName };
 			const liveResult: AgentResult = {
 				agent: params.agent,
 				task: params.task,
 				output: "",
 				exitCode: -1,
 				model: effective.model,
+				modelName: effectiveModelName,
 				contextWindow,
 				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 				progress: { agent: params.agent, status: "running" as const, task: params.task, recentTools: [], toolCount: 0, tokens: 0, durationMs: 0, lastMessage: "" },
 			};
 
-			const result = await semaphore.run(() =>
-				runSubagent(agent, params.task!, params.cwd ?? cwd, effective, signal, (progress, usage) => {
+			const result = await semaphore.run(() => {
+				// Re-check at the actual spawn boundary in case this call waited for a
+				// concurrency slot while session availability or workflow policy changed.
+				const liveWorkflowBlock = workflowAgentBlockMessage(agent.name);
+				if (liveWorkflowBlock) throw new Error(liveWorkflowBlock);
+				if (!isAgentEnabled(agent.name)) throw new Error(agentUnavailableMessage(agent.name));
+				return runSubagent(agent, params.task!, params.cwd ?? cwd, effectiveSettings, signal, (progress, usage) => {
 					liveResult.progress = progress;
 					liveResult.usage = { ...usage };
 					onUpdate?.({
 						content: [{ type: "text", text: "(running...)" }],
 						details: { results: [liveResult] },
 					});
-				}),
-			);
+				});
+			});
 
 			result.contextWindow = contextWindow;
+			if (!result.modelName) result.modelName = effectiveModelName;
+			liveResult.modelName = result.modelName;
 			const isError = result.exitCode !== 0 || !!result.progress.error;
 			return {
 				content: [{ type: "text", text: result.output || "(no output)" }],
@@ -1216,6 +1741,10 @@ export default function (pi: ExtensionAPI) {
 		// ── Render: result ──
 		renderResult(result, options, theme, context) {
 			const details = result.details as Details | undefined;
+			// Register invalidate for Ctrl+E toggle rerender
+			if (context?.invalidate) {
+				subagentErrorInvalidateCallbacks.add(context.invalidate);
+			}
 			if (!details?.results?.length) {
 				const t = result.content[0];
 				const text = t?.type === "text" ? t.text : "(no output)";
