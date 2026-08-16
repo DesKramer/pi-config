@@ -4,6 +4,12 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 const RERENDER_KEY = "tps-status";
 const MIN_UPDATE_INTERVAL_MS = 250;
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
+const CODEX_PROVIDER = "openai-codex";
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
+const CODEX_USAGE_TTL_MS = 60_000;
+const CODEX_USAGE_BACKOFF_MS = 30_000;
+const CODEX_USAGE_TIMEOUT_MS = 5_000;
 
 type TpsState = {
 	startedAt: number;
@@ -11,6 +17,79 @@ type TpsState = {
 	generatedChars: number;
 	lastDisplay: string;
 };
+
+type CodexUsageWindow = {
+	usedPercent: number;
+	limitWindowSeconds: number;
+	resetAt: number;
+};
+
+type CodexUsage = {
+	primary: CodexUsageWindow;
+	secondary: CodexUsageWindow;
+};
+
+function finiteNumberInRange(value: unknown, min: number, max: number): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+}
+
+function parseCodexWindow(value: unknown): CodexUsageWindow | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const window = value as Record<string, unknown>;
+	if (
+		!finiteNumberInRange(window.used_percent, 0, 100) ||
+		!finiteNumberInRange(window.limit_window_seconds, 1, 366 * 24 * 60 * 60) ||
+		!Number.isInteger(window.limit_window_seconds) ||
+		!finiteNumberInRange(window.reset_at, 1, 10_000_000_000) ||
+		!Number.isInteger(window.reset_at)
+	) return undefined;
+	return {
+		usedPercent: window.used_percent,
+		limitWindowSeconds: window.limit_window_seconds,
+		resetAt: window.reset_at,
+	};
+}
+
+function parseCodexUsage(value: unknown): CodexUsage | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const rateLimit = (value as { rate_limit?: unknown }).rate_limit;
+	if (!rateLimit || typeof rateLimit !== "object") return undefined;
+	const windows = rateLimit as { primary_window?: unknown; secondary_window?: unknown };
+	const primary = parseCodexWindow(windows.primary_window);
+	const secondary = parseCodexWindow(windows.secondary_window);
+	return primary && secondary ? { primary, secondary } : undefined;
+}
+
+function decodeCodexAccountId(token: string): string | undefined {
+	try {
+		const parts = token.split(".");
+		if (parts.length !== 3 || !parts[1]) return undefined;
+		const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+		const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+		const payload = JSON.parse(atob(padded)) as Record<string, unknown>;
+		const authClaim = payload[CODEX_AUTH_CLAIM];
+		if (!authClaim || typeof authClaim !== "object") return undefined;
+		const accountId = (authClaim as { chatgpt_account_id?: unknown }).chatgpt_account_id;
+		return typeof accountId === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(accountId)
+			? accountId
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function formatWindowDuration(seconds: number): string {
+	if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+	if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
+	if (seconds % 60 === 0) return `${seconds / 60}m`;
+	return `${seconds}s`;
+}
+
+function formatCodexUsage(usage: CodexUsage): string {
+	const formatWindow = (window: CodexUsageWindow) =>
+		`${formatWindowDuration(window.limitWindowSeconds)} ${Math.round(100 - window.usedPercent)}%`;
+	return `${formatWindow(usage.primary)} · ${formatWindow(usage.secondary)}`;
+}
 
 function estimateTokens(chars: number): number {
 	return Math.max(0, Math.round(chars / 4));
@@ -94,7 +173,12 @@ function sanitizeStatusText(text: string): string {
 	return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
 }
 
-function createFooter(getCtx: () => any, pi: ExtensionAPI, getTpsDisplay: () => string) {
+function createFooter(
+	getCtx: () => any,
+	pi: ExtensionAPI,
+	getTpsDisplay: () => string,
+	getCodexUsageDisplay: () => string,
+) {
 	return (_tui: any, theme: any, footerData: any) => ({
 		render(width: number): string[] {
 			const ctx = getCtx();
@@ -160,9 +244,14 @@ function createFooter(getCtx: () => any, pi: ExtensionAPI, getTpsDisplay: () => 
 				statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
 			}
 
-			const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
-			if (totalCost || usingSubscription) {
-				statsParts.push(`$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+			const usingCodex = ctx.model?.provider === CODEX_PROVIDER;
+			if (usingCodex) {
+				statsParts.push(getCodexUsageDisplay());
+			} else {
+				const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
+				if (totalCost || usingSubscription) {
+					statsParts.push(`$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+				}
 			}
 
 			const contextPercentDisplay = contextPercent === "?"
@@ -240,21 +329,90 @@ export default function (pi: ExtensionAPI): void {
 	let state: TpsState | undefined;
 	let lastTpsDisplay = "--";
 	let renderCtx: any;
+	let codexUsage: CodexUsage | undefined;
+	let codexUsageFetchedAt = 0;
+	let codexNextRefreshAt = 0;
+	let codexUsageLoading = false;
+	let codexUsageRequest: Promise<void> | undefined;
+	let codexUsageAbort: AbortController | undefined;
+	let stopped = false;
 
 	const requestFooterRender = (ctx: any) => {
 		if (ctx.hasUI) ctx.ui.setStatus(RERENDER_KEY, undefined);
 	};
 
+	const getCodexUsageDisplay = () => codexUsage
+		? formatCodexUsage(codexUsage)
+		: codexUsageLoading
+			? "quota…"
+			: "quota unavailable";
+
+	const refreshCodexUsage = (ctx: any, force = false): Promise<void> => {
+		if (stopped || ctx.model?.provider !== CODEX_PROVIDER) return Promise.resolve();
+		const now = Date.now();
+		if (codexUsageRequest) return codexUsageRequest;
+		if (now < codexNextRefreshAt || (!force && codexUsage && now - codexUsageFetchedAt < CODEX_USAGE_TTL_MS)) {
+			return Promise.resolve();
+		}
+
+		codexUsageLoading = !codexUsage;
+		requestFooterRender(ctx);
+		const controller = new AbortController();
+		codexUsageAbort = controller;
+		const timeout = setTimeout(() => controller.abort(), CODEX_USAGE_TIMEOUT_MS);
+
+		codexUsageRequest = (async () => {
+			try {
+				const auth = await ctx.modelRegistry.getProviderAuth(CODEX_PROVIDER);
+				if (controller.signal.aborted) throw new Error("Codex usage request timed out");
+				const token = auth?.auth.apiKey;
+				const accountId = typeof token === "string" ? decodeCodexAccountId(token) : undefined;
+				if (!token || !accountId) throw new Error("Codex OAuth credentials unavailable");
+
+				const response = await fetch(CODEX_USAGE_URL, {
+					method: "GET",
+					headers: {
+						Authorization: `Bearer ${token}`,
+						"ChatGPT-Account-Id": accountId,
+					},
+					signal: controller.signal,
+				});
+				if (!response.ok) throw new Error("Codex usage request failed");
+				const usage = parseCodexUsage(await response.json());
+				if (!usage) throw new Error("Invalid Codex usage response");
+				codexUsage = usage;
+				codexUsageFetchedAt = Date.now();
+				codexNextRefreshAt = 0;
+			} catch {
+				if (!stopped) codexNextRefreshAt = Date.now() + CODEX_USAGE_BACKOFF_MS;
+			} finally {
+				clearTimeout(timeout);
+				if (codexUsageAbort === controller) codexUsageAbort = undefined;
+				codexUsageLoading = false;
+				codexUsageRequest = undefined;
+				if (!stopped) requestFooterRender(ctx);
+			}
+		})();
+		return codexUsageRequest;
+	};
+
 	pi.on("session_start", (_event, ctx) => {
 		renderCtx = ctx;
 		if (ctx.mode !== "tui") return;
-		ctx.ui.setFooter(createFooter(() => renderCtx, pi, () => lastTpsDisplay));
+		ctx.ui.setFooter(createFooter(
+			() => renderCtx,
+			pi,
+			() => lastTpsDisplay,
+			getCodexUsageDisplay,
+		));
 		requestFooterRender(ctx);
+		void refreshCodexUsage(ctx);
 	});
 
 	pi.on("model_select", (_event, ctx) => {
 		renderCtx = ctx;
 		requestFooterRender(ctx);
+		void refreshCodexUsage(ctx);
 	});
 
 	pi.on("message_update", (event, ctx) => {
@@ -307,6 +465,12 @@ export default function (pi: ExtensionAPI): void {
 		lastTpsDisplay = state?.lastDisplay ?? lastTpsDisplay;
 		state = undefined;
 		requestFooterRender(ctx);
+		void refreshCodexUsage(ctx, true);
+	});
+
+	pi.on("session_shutdown", () => {
+		stopped = true;
+		codexUsageAbort?.abort();
 	});
 
 	pi.on("tool_execution_start", (_event, ctx) => {
