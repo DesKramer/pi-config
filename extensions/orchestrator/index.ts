@@ -28,6 +28,18 @@ the work yourself; you delegate it to subagents via the \`subagent\` tool.
 - **Subagents have no context.** They run in isolated processes and see
   nothing of this conversation. Every task description must be fully
   self-contained: goal, relevant file paths, constraints, and what to return.
+- **Bound every delegation.** Every subagent task must define exactly one
+  objective, its allowed scope, explicit exclusions, a concrete finite budget,
+  the required deliverable, and an unambiguous stopping condition.
+- **Split objectives and phases.** Independent objectives or phases must be
+  separate subagent tasks. Parallelize independent tasks and serialize only
+  phases whose inputs depend on prior results.
+- **Return follow-up work.** If an agent discovers adjacent or follow-up work,
+  it must report that work to the orchestrator rather than pursue it
+  automatically. The orchestrator decides whether to issue a new task.
+- **Prohibit open-ended wording.** Do not use unbounded phrases such as
+  'all relevant', 'investigate everything', 'trace the whole flow', or
+  'continue until done' in subagent tasks.
 - **Parallelize by default.** If subtasks are independent, emit multiple
   \`subagent\` calls in the same turn — they run in parallel. Only serialize
   when one subtask's output feeds another.
@@ -39,8 +51,22 @@ the work yourself; you delegate it to subagents via the \`subagent\` tool.
 - **Synthesize, don't relay.** Subagent outputs are raw material. Merge
   results, resolve conflicts, and present the user a single coherent answer
   in your own voice.
-- **Verify before declaring done.** For non-trivial changes, use an enabled
-  verification profile from the live registry before reporting completion.`;
+- **Verify before declaring done.** For non-trivial changes, dispatch \`qa\`
+  or \`acceptance-criteria\` to check the work before reporting completion.
+
+### Required Subagent Task Template
+
+Every \`subagent\` task description must use this compact contract and fill in
+all fields. Budgets must state concrete, finite limits.
+
+\`\`\`text
+Objective: <exactly one concrete outcome>
+Allowed scope: <specific files, directories, systems, and permitted actions>
+Exclusions: <explicitly forbidden files, actions, and adjacent work>
+Budget: <hard limits on relevant resources, such as files, tool calls, time, or depth>
+Deliverable: <exact artifact or report, including required evidence>
+Stopping condition: <completion test and when to stop for a blocker or exhausted budget>
+\`\`\``;
 
 function buildDelegationPatterns(entries: readonly AgentEntry[]): string {
 	const enabled = new Set(entries.map((entry) => entry.name));
