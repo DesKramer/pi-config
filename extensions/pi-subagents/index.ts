@@ -189,29 +189,6 @@ const SUBAGENT_ALLOWLIST: string[] | undefined = (() => {
 	return list.length > 0 || explicitlySet ? list : undefined;
 })();
 
-let showFullSubagentErrors = false;
-const subagentErrorInvalidateCallbacks = new Set<() => void>();
-export function getShowFullSubagentErrors(): boolean {
-	return showFullSubagentErrors;
-}
-export function setShowFullSubagentErrors(value: boolean): void {
-	showFullSubagentErrors = value;
-	for (const cb of subagentErrorInvalidateCallbacks) {
-		try {
-			cb();
-		} catch {}
-	}
-}
-export function toggleShowFullSubagentErrors(): boolean {
-	showFullSubagentErrors = !showFullSubagentErrors;
-	for (const cb of subagentErrorInvalidateCallbacks) {
-		try {
-			cb();
-		} catch {}
-	}
-	return showFullSubagentErrors;
-}
-
 export function registerAgent(config: AgentConfig): void {
 	if (SUBAGENT_ALLOWLIST && !SUBAGENT_ALLOWLIST.includes(config.name)) return;
 	if (agents.find((a) => a.name === config.name)) {
@@ -1119,19 +1096,9 @@ function renderAgentProgress(
 		addLine(usageParts.join(" "));
 	}
 
-	// Error — toggleable via Ctrl+E (showFullSubagentErrors)
+	// Error — keep the default compact, single-line presentation.
 	if (prog.error) {
-		if (showFullSubagentErrors) {
-			const errorLines = prog.error.split("\n");
-			for (let i = 0; i < errorLines.length; i++) {
-				const prefix = i === 0 ? "Error: " : "  ";
-				c.addChild(new Text(indent + theme.fg("error", prefix + errorLines[i]), 0, 0));
-			}
-			c.addChild(new Text(indent + theme.fg("dim", "(Ctrl+E to collapse)"), 0, 0));
-		} else {
-			const hint = theme.fg("dim", " (Ctrl+E to expand)");
-			addLine(theme.fg("error", `Error: ${prog.error}`) + hint);
-		}
+		addLine(theme.fg("error", `Error: ${prog.error}`));
 	}
 
 	return c;
@@ -1556,13 +1523,6 @@ export default function (pi: ExtensionAPI) {
 	availabilityChanged = (name, enabled) => {
 		pi.events?.emit("pi-subagents:availability-changed", { name, enabled });
 	};
-	(pi as unknown as { registerShortcut?: ExtensionAPI["registerShortcut"] }).registerShortcut?.("ctrl+e", {
-		description: "Toggle subagent error details",
-		handler: (ctx) => {
-			const nowExpanded = toggleShowFullSubagentErrors();
-			ctx.ui.notify(nowExpanded ? "Subagent errors: expanded" : "Subagent errors: collapsed", "info");
-		},
-	});
 	const config = loadConfig();
 	const semaphore = new Semaphore(config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY);
 	agents = loadAgents();
@@ -1739,12 +1699,8 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		// ── Render: result ──
-		renderResult(result, options, theme, context) {
+		renderResult(result, options, theme, _context) {
 			const details = result.details as Details | undefined;
-			// Register invalidate for Ctrl+E toggle rerender
-			if (context?.invalidate) {
-				subagentErrorInvalidateCallbacks.add(context.invalidate);
-			}
 			if (!details?.results?.length) {
 				const t = result.content[0];
 				const text = t?.type === "text" ? t.text : "(no output)";
