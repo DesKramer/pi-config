@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { release as osRelease } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 const RERENDER_KEY = "tps-status";
@@ -10,6 +11,8 @@ const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
 const CODEX_USAGE_TTL_MS = 60_000;
 const CODEX_USAGE_BACKOFF_MS = 30_000;
 const CODEX_USAGE_TIMEOUT_MS = 5_000;
+const CODEX_ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const CODEX_USER_AGENT = `pi (${process.platform} ${osRelease()}; ${process.arch})`;
 
 type TpsState = {
 	startedAt: number;
@@ -21,13 +24,72 @@ type TpsState = {
 type CodexUsageWindow = {
 	usedPercent: number;
 	limitWindowSeconds: number;
-	resetAt: number;
+	resetAt?: number;
 };
 
 type CodexUsage = {
-	primary: CodexUsageWindow;
-	secondary: CodexUsageWindow;
+	primary?: CodexUsageWindow;
+	secondary?: CodexUsageWindow;
 };
+
+type CodexUsageFailureKind = "runtime-api" | "auth" | "timeout" | "network" | "json" | "schema";
+type CodexUsageFailure =
+	| { kind: CodexUsageFailureKind }
+	| { kind: "http"; status: number | undefined };
+
+type CodexAuthRegistry = {
+	getProviderAuth?: (provider: string) => Promise<unknown>;
+	getApiKeyForProvider?: (provider: string) => Promise<unknown>;
+};
+
+class CodexUsageFailureError extends Error {
+	constructor(readonly failure: CodexUsageFailure) {
+		super("Codex usage failure");
+	}
+}
+
+function simpleCodexUsageFailure(kind: CodexUsageFailureKind): CodexUsageFailure {
+	return { kind };
+}
+
+function formatCodexUsageFailure(failure: CodexUsageFailure): string {
+	if (failure.kind !== "http") return failure.kind;
+	return failure.status === undefined ? "http" : `http-${failure.status}`;
+}
+
+function tokenFromProviderAuth(value: unknown): string | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const auth = (value as { auth?: unknown }).auth;
+	if (!auth || typeof auth !== "object") return undefined;
+	const token = (auth as { apiKey?: unknown }).apiKey;
+	return typeof token === "string" && token.length > 0 ? token : undefined;
+}
+
+async function resolveCodexToken(value: unknown): Promise<string> {
+	if (!value || typeof value !== "object") {
+		throw new CodexUsageFailureError(simpleCodexUsageFailure("runtime-api"));
+	}
+	const registry = value as CodexAuthRegistry;
+	const getProviderAuth = registry.getProviderAuth;
+	const getApiKeyForProvider = registry.getApiKeyForProvider;
+	if (typeof getProviderAuth !== "function" && typeof getApiKeyForProvider !== "function") {
+		throw new CodexUsageFailureError(simpleCodexUsageFailure("runtime-api"));
+	}
+
+	try {
+		if (typeof getProviderAuth === "function") {
+			const token = tokenFromProviderAuth(await getProviderAuth.call(registry, CODEX_PROVIDER));
+			if (token) return token;
+		}
+		if (typeof getApiKeyForProvider === "function") {
+			const token = await getApiKeyForProvider.call(registry, CODEX_PROVIDER);
+			if (typeof token === "string" && token.length > 0) return token;
+		}
+	} catch {
+		throw new CodexUsageFailureError(simpleCodexUsageFailure("auth"));
+	}
+	throw new CodexUsageFailureError(simpleCodexUsageFailure("auth"));
+}
 
 function finiteNumberInRange(value: unknown, min: number, max: number): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
@@ -36,17 +98,19 @@ function finiteNumberInRange(value: unknown, min: number, max: number): value is
 function parseCodexWindow(value: unknown): CodexUsageWindow | undefined {
 	if (!value || typeof value !== "object") return undefined;
 	const window = value as Record<string, unknown>;
+	const resetAt = window.reset_at;
 	if (
 		!finiteNumberInRange(window.used_percent, 0, 100) ||
 		!finiteNumberInRange(window.limit_window_seconds, 1, 366 * 24 * 60 * 60) ||
 		!Number.isInteger(window.limit_window_seconds) ||
-		!finiteNumberInRange(window.reset_at, 1, 10_000_000_000) ||
-		!Number.isInteger(window.reset_at)
+		(resetAt !== undefined && resetAt !== null && (
+			!finiteNumberInRange(resetAt, 1, 10_000_000_000) || !Number.isInteger(resetAt)
+		))
 	) return undefined;
 	return {
 		usedPercent: window.used_percent,
 		limitWindowSeconds: window.limit_window_seconds,
-		resetAt: window.reset_at,
+		...(typeof resetAt === "number" ? { resetAt } : {}),
 	};
 }
 
@@ -57,7 +121,11 @@ function parseCodexUsage(value: unknown): CodexUsage | undefined {
 	const windows = rateLimit as { primary_window?: unknown; secondary_window?: unknown };
 	const primary = parseCodexWindow(windows.primary_window);
 	const secondary = parseCodexWindow(windows.secondary_window);
-	return primary && secondary ? { primary, secondary } : undefined;
+	if (!primary && !secondary) return undefined;
+	return {
+		...(primary ? { primary } : {}),
+		...(secondary ? { secondary } : {}),
+	};
 }
 
 function decodeCodexAccountId(token: string): string | undefined {
@@ -70,9 +138,7 @@ function decodeCodexAccountId(token: string): string | undefined {
 		const authClaim = payload[CODEX_AUTH_CLAIM];
 		if (!authClaim || typeof authClaim !== "object") return undefined;
 		const accountId = (authClaim as { chatgpt_account_id?: unknown }).chatgpt_account_id;
-		return typeof accountId === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(accountId)
-			? accountId
-			: undefined;
+		return typeof accountId === "string" && CODEX_ACCOUNT_ID_PATTERN.test(accountId) ? accountId : undefined;
 	} catch {
 		return undefined;
 	}
@@ -88,7 +154,10 @@ function formatWindowDuration(seconds: number): string {
 function formatCodexUsage(usage: CodexUsage): string {
 	const formatWindow = (window: CodexUsageWindow) =>
 		`${formatWindowDuration(window.limitWindowSeconds)} ${Math.round(100 - window.usedPercent)}%`;
-	return `${formatWindow(usage.primary)} · ${formatWindow(usage.secondary)}`;
+	return [usage.primary, usage.secondary]
+		.filter((window): window is CodexUsageWindow => window !== undefined)
+		.map(formatWindow)
+		.join(" · ");
 }
 
 function estimateTokens(chars: number): number {
@@ -333,6 +402,7 @@ export default function (pi: ExtensionAPI): void {
 	let codexUsageFetchedAt = 0;
 	let codexNextRefreshAt = 0;
 	let codexUsageLoading = false;
+	let codexUsageFailure: CodexUsageFailure | undefined;
 	let codexUsageRequest: Promise<void> | undefined;
 	let codexUsageAbort: AbortController | undefined;
 	let stopped = false;
@@ -341,58 +411,94 @@ export default function (pi: ExtensionAPI): void {
 		if (ctx.hasUI) ctx.ui.setStatus(RERENDER_KEY, undefined);
 	};
 
-	const getCodexUsageDisplay = () => codexUsage
-		? formatCodexUsage(codexUsage)
-		: codexUsageLoading
-			? "quota…"
-			: "quota unavailable";
+	const getCodexUsageDisplay = () => {
+		const failure = codexUsageFailure ? formatCodexUsageFailure(codexUsageFailure) : undefined;
+		if (codexUsage) return `${formatCodexUsage(codexUsage)}${failure ? ` [${failure}]` : ""}`;
+		if (codexUsageLoading) return "quota…";
+		return failure ? `quota [${failure}]` : "quota --";
+	};
 
 	const refreshCodexUsage = (ctx: any, force = false): Promise<void> => {
 		if (stopped || ctx.model?.provider !== CODEX_PROVIDER) return Promise.resolve();
 		const now = Date.now();
 		if (codexUsageRequest) return codexUsageRequest;
-		if (now < codexNextRefreshAt || (!force && codexUsage && now - codexUsageFetchedAt < CODEX_USAGE_TTL_MS)) {
-			return Promise.resolve();
-		}
+		if (!force && (
+			now < codexNextRefreshAt ||
+			(codexUsage && now - codexUsageFetchedAt < CODEX_USAGE_TTL_MS)
+		)) return Promise.resolve();
 
 		codexUsageLoading = !codexUsage;
+		codexUsageFailure = undefined;
 		requestFooterRender(ctx);
-		const controller = new AbortController();
-		codexUsageAbort = controller;
-		const timeout = setTimeout(() => controller.abort(), CODEX_USAGE_TIMEOUT_MS);
 
-		codexUsageRequest = (async () => {
+		// Defer execution until after the shared request slot is assigned, so even
+		// synchronous pre-await failures can clear it for a later retry.
+		codexUsageRequest = Promise.resolve().then(async () => {
+			let controller: AbortController | undefined;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			let timedOut = false;
 			try {
-				const auth = await ctx.modelRegistry.getProviderAuth(CODEX_PROVIDER);
-				if (controller.signal.aborted) throw new Error("Codex usage request timed out");
-				const token = auth?.auth.apiKey;
-				const accountId = typeof token === "string" ? decodeCodexAccountId(token) : undefined;
-				if (!token || !accountId) throw new Error("Codex OAuth credentials unavailable");
+				if (typeof fetch !== "function") {
+					throw new CodexUsageFailureError(simpleCodexUsageFailure("runtime-api"));
+				}
+				const token = await resolveCodexToken(ctx.modelRegistry);
+				if (stopped) return;
+
+				const accountId = decodeCodexAccountId(token);
+				const headers: Record<string, string> = {
+					Accept: "application/json",
+					Authorization: `Bearer ${token}`,
+					originator: "pi",
+					"User-Agent": CODEX_USER_AGENT,
+				};
+				if (accountId) headers["ChatGPT-Account-Id"] = accountId;
+
+				controller = new AbortController();
+				codexUsageAbort = controller;
+				timeout = setTimeout(() => {
+					timedOut = true;
+					controller?.abort();
+				}, CODEX_USAGE_TIMEOUT_MS);
 
 				const response = await fetch(CODEX_USAGE_URL, {
 					method: "GET",
-					headers: {
-						Authorization: `Bearer ${token}`,
-						"ChatGPT-Account-Id": accountId,
-					},
+					headers,
 					signal: controller.signal,
 				});
-				if (!response.ok) throw new Error("Codex usage request failed");
-				const usage = parseCodexUsage(await response.json());
-				if (!usage) throw new Error("Invalid Codex usage response");
+				if (!response.ok) {
+					const status = Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
+						? response.status
+						: undefined;
+					throw new CodexUsageFailureError({ kind: "http", status });
+				}
+
+				let payload: unknown;
+				try {
+					payload = await response.json();
+				} catch {
+					throw new CodexUsageFailureError(simpleCodexUsageFailure(timedOut ? "timeout" : "json"));
+				}
+				const usage = parseCodexUsage(payload);
+				if (!usage) throw new CodexUsageFailureError(simpleCodexUsageFailure("schema"));
 				codexUsage = usage;
 				codexUsageFetchedAt = Date.now();
 				codexNextRefreshAt = 0;
-			} catch {
-				if (!stopped) codexNextRefreshAt = Date.now() + CODEX_USAGE_BACKOFF_MS;
+				codexUsageFailure = undefined;
+			} catch (error) {
+				if (!stopped) {
+					codexUsageFailure = error instanceof CodexUsageFailureError
+						? error.failure
+						: simpleCodexUsageFailure(timedOut ? "timeout" : "network");
+					codexNextRefreshAt = Date.now() + CODEX_USAGE_BACKOFF_MS;
+				}
 			} finally {
-				clearTimeout(timeout);
-				if (codexUsageAbort === controller) codexUsageAbort = undefined;
+				if (timeout !== undefined) clearTimeout(timeout);
+				if (controller && codexUsageAbort === controller) codexUsageAbort = undefined;
 				codexUsageLoading = false;
 				codexUsageRequest = undefined;
 				if (!stopped) requestFooterRender(ctx);
 			}
-		})();
+		});
 		return codexUsageRequest;
 	};
 
