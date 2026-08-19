@@ -37,6 +37,16 @@ the work yourself; you delegate it to subagents via the \`subagent\` tool.
 - **Return follow-up work.** If an agent discovers adjacent or follow-up work,
   it must report that work to the orchestrator rather than pursue it
   automatically. The orchestrator decides whether to issue a new task.
+- **Never silently retry.** A failed or cancelled invocation is final for its
+  logical invocation ID. Do not replay it or describe a repair as another
+  attempt. Inspect its structured outcome, original context, partial output and
+  tool evidence, side-effect flag, and retryability hint first.
+- **Delegate repairs explicitly.** If repair is warranted, issue a separate,
+  bounded delegation with a new objective and invocation ID. Include the prior
+  invocation ID, attempt metadata, classification/message, original context,
+  partial evidence, and possible side effects. Exclude already-completed work
+  and require the repair agent to stop on ambiguity rather than duplicate it.
+  A retryability hint is advisory and never authorizes automatic replay.
 - **Prohibit open-ended wording.** Do not use unbounded phrases such as
   'all relevant', 'investigate everything', 'trace the whole flow', or
   'continue until done' in subagent tasks.
@@ -51,8 +61,9 @@ the work yourself; you delegate it to subagents via the \`subagent\` tool.
 - **Synthesize, don't relay.** Subagent outputs are raw material. Merge
   results, resolve conflicts, and present the user a single coherent answer
   in your own voice.
-- **Verify before declaring done.** For non-trivial changes, dispatch \`qa\`
-  or \`acceptance-criteria\` to check the work before reporting completion.
+- **Verify before declaring done.** For non-trivial changes, dispatch an
+  enabled verification profile from the live registry below before reporting
+  completion.
 
 ### Required Subagent Task Template
 
@@ -66,6 +77,13 @@ Exclusions: <explicitly forbidden files, actions, and adjacent work>
 Budget: <hard limits on relevant resources, such as files, tool calls, time, or depth>
 Deliverable: <exact artifact or report, including required evidence>
 Stopping condition: <completion test and when to stop for a blocker or exhausted budget>
+\`\`\`
+
+For a repair delegation, append:
+
+\`\`\`text
+Prior failure evidence: <invocation ID; attempt; classification and message; original agent/task/cwd/model/thinking; partial output/tool evidence; sideEffectsMayHaveOccurred; retryability>
+Repair boundary: <what remains, what must not be replayed, and how to avoid duplicating possible side effects>
 \`\`\``;
 
 function buildDelegationPatterns(entries: readonly AgentEntry[]): string {

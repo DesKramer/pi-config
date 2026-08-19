@@ -44,7 +44,7 @@ One tool call = one subagent:
 
 To fan out, emit multiple `subagent` tool calls in the same assistant turn — pi runs them in parallel automatically. A per-process semaphore caps simultaneous subagents at `maxConcurrency` (default 4); calls past the cap wait their turn.
 
-Each subagent runs as an isolated `pi` process with no inherited context — all context must be in the task description.
+Each subagent runs as an isolated `pi` process with no inherited context — all context must be in the task description. Ordinary task descriptions are not size-limited by this extension; long tasks are passed to the child through a temporary file.
 
 ## Config
 
@@ -59,6 +59,32 @@ Optional `config.json` next to `index.ts`:
 Subagents return text only — there's no file handoff. If the parent needs artifacts, instruct the subagent to `write` them and return the path.
 
 Large outputs (>`DEFAULT_MAX_BYTES`) are head-truncated before being returned to the parent.
+
+Every started logical invocation returns structured `details.results[0]` evidence in addition to text output:
+
+- `invocationId` is the host tool-call ID and remains stable for that invocation; `attempt` is always `{ number: 1, maxAttempts: 1 }` because this extension never retries.
+- `context` preserves the requested agent, task, working directory, and effective model/thinking settings.
+- `outcome` is `completed`, `failed`, or `cancelled`. Observable failures are classified as `cancelled`, `spawn_failure`, `provider_failure`, `nonzero_exit`, or conservative generic `failure`.
+- `output`, `progress.recentTools`, and usage retain partial evidence available before failure. `sideEffectsMayHaveOccurred` becomes true when an observed tool is not on the known read-only list.
+- `retryability` is `retryable`, `not_retryable`, or `unknown`. It is only a conservative hint; no failed work is automatically replayed.
+
+### Durable branch-local failure checkpoints and repair linkage
+
+Failed and cancelled terminal outcomes are persisted as version `1` `pi-subagent-checkpoint` custom entries before the tool returns. The append-only record stream contains `failure`, `repair-started`, and `repair-finished` records. Checkpoints store bounded evidence rather than child sessions: task snapshots and serialized repair objectives are capped at 8 KiB, output at 16 KiB, error at 2 KiB, and only the latest 20 tool calls are retained; each serialized entry is capped at 64 KiB. Prior evidence and the explicit objective injected into a repair child are also bounded. Child sessions are never persisted or resumed.
+
+On `session_start` and `session_tree`, the extension reconstructs state exclusively from `ctx.sessionManager.getBranch()`, so failures from other tree branches are not repairable or exposed. At most the 50 most recent unresolved chains are retained in memory. A `repair-started` record without a matching finish after restart is shown as interrupted; it is never resumed, and its original failure remains available for a new explicit repair.
+
+A repair is a new logical invocation, not another attempt. Pass `repairOfInvocationId` with an explicit `task` containing the repair objective:
+
+```json
+{ "agent": "worker", "task": "Repair only the failing parser assertion; preserve unrelated edits.", "repairOfInvocationId": "prior-tool-call-id" }
+```
+
+The ID must name an unresolved failed/cancelled checkpoint on the current branch. The extension creates a new invocation ID, writes `repair-started`, and launches one fresh child with bounded prior evidence plus the explicit objective. It never automatically retries or replays the original task. A terminal repair writes `repair-finished` before returning: success resolves the prior failure; failed/cancelled repair becomes the new unresolved, explicitly linked failure in that chain.
+
+Up to 5 unresolved chains (12 KiB total) are conservatively exposed in the parent prompt, with instructions not to replay automatically. `/subagent-checkpoints` gives a concise branch-local summary and identifies interrupted repairs.
+
+Session storage is append-only: the extension bounds each new record and its restored/in-memory view, but cannot physically prune historical checkpoint entries already present in the session file.
 
 ## UI
 

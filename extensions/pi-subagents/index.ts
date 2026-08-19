@@ -108,7 +108,25 @@ interface AgentProgress {
 	error?: string;
 }
 
-interface AgentResult {
+export type SubagentFailureClassification = "failure" | "cancelled" | "spawn_failure" | "provider_failure" | "nonzero_exit";
+export type SubagentRetryability = "retryable" | "not_retryable" | "unknown";
+
+export interface SubagentInvocationMetadata {
+	/** Stable logical ID for this tool invocation. A repair delegation gets a new ID. */
+	invocationId: string;
+	attempt: { number: 1; maxAttempts: 1 };
+	context: {
+		agent: string;
+		task: string;
+		cwd: string;
+		model: string;
+		thinking: string;
+	};
+}
+
+interface AgentResult extends SubagentInvocationMetadata {
+	/** Present only when this fresh invocation explicitly repairs a durable failure. */
+	repairOfInvocationId?: string;
 	agent: string;
 	task: string;
 	output: string;
@@ -117,11 +135,211 @@ interface AgentResult {
 	model?: string;
 	modelName?: string;
 	contextWindow?: number;
+	outcome: {
+		status: "completed" | "failed" | "cancelled";
+		classification?: SubagentFailureClassification;
+		message?: string;
+	};
+	/** Conservative task-level side-effect signal based on observed tool calls. */
+	sideEffectsMayHaveOccurred: boolean;
+	/** Advisory only; the extension never retries or replays an invocation. */
+	retryability: SubagentRetryability;
 	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number };
 }
 
 interface Details {
 	results: AgentResult[];
+}
+
+// ── Durable failure checkpoints ──────────────────────────────────────
+
+export const SUBAGENT_CHECKPOINT_TYPE = "pi-subagent-checkpoint";
+export const SUBAGENT_CHECKPOINT_VERSION = 1;
+const MAX_TASK_BYTES = 8 * 1024;
+const MAX_OUTPUT_BYTES = 16 * 1024;
+const MAX_ERROR_BYTES = 2 * 1024;
+const MAX_CHECKPOINT_TOOLS = 20;
+const MAX_TOOL_EVIDENCE_BYTES = 1024;
+const MAX_CHECKPOINT_ENTRY_BYTES = 64 * 1024;
+const MAX_RESTORED_CHAINS = 50;
+const MAX_PROMPT_CHAINS = 5;
+const MAX_PROMPT_BYTES = 12 * 1024;
+
+interface CheckpointToolEvidence {
+	tool: string;
+	args: string;
+	status: "running" | "done";
+}
+
+export interface BoundedSubagentEvidence {
+	invocationId: string;
+	repairOfInvocationId?: string;
+	agent: string;
+	task: string;
+	cwd: string;
+	model: string;
+	thinking: string;
+	status: "completed" | "failed" | "cancelled";
+	classification?: SubagentFailureClassification;
+	message?: string;
+	output: string;
+	exitCode: number;
+	sideEffectsMayHaveOccurred: boolean;
+	retryability: SubagentRetryability;
+	recentTools: CheckpointToolEvidence[];
+	recordedAt: number;
+}
+
+export type SubagentCheckpoint =
+	| { version: 1; kind: "failure"; evidence: BoundedSubagentEvidence }
+	| { version: 1; kind: "repair-started"; invocationId: string; repairOfInvocationId: string; objective: string; recordedAt: number }
+	| { version: 1; kind: "repair-finished"; invocationId: string; repairOfInvocationId: string; evidence: BoundedSubagentEvidence; recordedAt: number };
+
+export interface RestorableSubagentFailure {
+	invocationId: string;
+	repairOfInvocationId?: string;
+	evidence: BoundedSubagentEvidence;
+	interruptedRepairInvocationIds: string[];
+}
+
+interface CheckpointState {
+	failures: Map<string, RestorableSubagentFailure>;
+	activeRepairs: Map<string, { repairOfInvocationId: string; recordedAt: number }>;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+	if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+	let result = Buffer.from(value, "utf8").subarray(0, Math.max(0, maxBytes - 3)).toString("utf8");
+	while (Buffer.byteLength(result + "…", "utf8") > maxBytes) result = result.slice(0, -1);
+	return result + "…";
+}
+
+function checkpointFromResult(result: AgentResult, recordedAt = Date.now()): BoundedSubagentEvidence {
+	return {
+		invocationId: result.invocationId,
+		...(result.repairOfInvocationId ? { repairOfInvocationId: result.repairOfInvocationId } : {}),
+		agent: result.agent,
+		task: truncateUtf8(result.context.task, MAX_TASK_BYTES),
+		cwd: truncateUtf8(result.context.cwd, 2048),
+		model: truncateUtf8(result.context.model, 512),
+		thinking: truncateUtf8(result.context.thinking, 64),
+		status: result.outcome.status,
+		classification: result.outcome.classification,
+		message: result.outcome.message ? truncateUtf8(result.outcome.message, MAX_ERROR_BYTES) : undefined,
+		output: truncateUtf8(result.output, MAX_OUTPUT_BYTES),
+		exitCode: result.exitCode,
+		sideEffectsMayHaveOccurred: result.sideEffectsMayHaveOccurred,
+		retryability: result.retryability,
+		recentTools: result.progress.recentTools.slice(-MAX_CHECKPOINT_TOOLS).map((event) => ({
+			tool: truncateUtf8(event.tool, 128),
+			args: truncateUtf8(event.args, MAX_TOOL_EVIDENCE_BYTES),
+			status: event.status,
+		})),
+		recordedAt,
+	};
+}
+
+function isCheckpoint(value: unknown): value is SubagentCheckpoint {
+	if (!value || typeof value !== "object") return false;
+	const record = value as Record<string, unknown>;
+	if (record.version !== SUBAGENT_CHECKPOINT_VERSION) return false;
+	if (record.kind === "failure") return !!record.evidence && typeof record.evidence === "object";
+	if (record.kind === "repair-started") {
+		return typeof record.invocationId === "string" && typeof record.repairOfInvocationId === "string" && typeof record.objective === "string";
+	}
+	return record.kind === "repair-finished"
+		&& typeof record.invocationId === "string"
+		&& typeof record.repairOfInvocationId === "string"
+		&& !!record.evidence && typeof record.evidence === "object";
+}
+
+function applyCheckpoint(state: CheckpointState, checkpoint: SubagentCheckpoint): void {
+	if (checkpoint.kind === "failure") {
+		if (checkpoint.evidence.status !== "failed" && checkpoint.evidence.status !== "cancelled") return;
+		state.failures.set(checkpoint.evidence.invocationId, {
+			invocationId: checkpoint.evidence.invocationId,
+			repairOfInvocationId: checkpoint.evidence.repairOfInvocationId,
+			evidence: checkpoint.evidence,
+			interruptedRepairInvocationIds: [],
+		});
+		return;
+	}
+	if (checkpoint.kind === "repair-started") {
+		if (state.failures.has(checkpoint.repairOfInvocationId)) {
+			state.activeRepairs.set(checkpoint.invocationId, {
+				repairOfInvocationId: checkpoint.repairOfInvocationId,
+				recordedAt: checkpoint.recordedAt,
+			});
+		}
+		return;
+	}
+
+	state.activeRepairs.delete(checkpoint.invocationId);
+	if (!state.failures.has(checkpoint.repairOfInvocationId)) return;
+	state.failures.delete(checkpoint.repairOfInvocationId);
+	if (checkpoint.evidence.status === "failed" || checkpoint.evidence.status === "cancelled") {
+		state.failures.set(checkpoint.invocationId, {
+			invocationId: checkpoint.invocationId,
+			repairOfInvocationId: checkpoint.repairOfInvocationId,
+			evidence: checkpoint.evidence,
+			interruptedRepairInvocationIds: [],
+		});
+	}
+}
+
+/** Reconstruct only from entries on the supplied current branch. */
+export function restoreSubagentCheckpoints(entries: readonly unknown[]): RestorableSubagentFailure[] {
+	const state: CheckpointState = { failures: new Map(), activeRepairs: new Map() };
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const candidate = entry as { type?: string; customType?: string; data?: unknown };
+		if (candidate.type !== "custom" || candidate.customType !== SUBAGENT_CHECKPOINT_TYPE || !isCheckpoint(candidate.data)) continue;
+		if (Buffer.byteLength(JSON.stringify(candidate.data), "utf8") > MAX_CHECKPOINT_ENTRY_BYTES) continue;
+		applyCheckpoint(state, candidate.data);
+	}
+	// A started repair has no resumable child session. Keep its target available,
+	// but expose that the prior process was interrupted so a new invocation is required.
+	for (const [repairInvocationId, repair] of state.activeRepairs) {
+		const target = state.failures.get(repair.repairOfInvocationId);
+		if (target) target.interruptedRepairInvocationIds.push(repairInvocationId);
+	}
+	return [...state.failures.values()]
+		.sort((a, b) => a.evidence.recordedAt - b.evidence.recordedAt)
+		.slice(-MAX_RESTORED_CHAINS);
+}
+
+export function formatRestorableFailurePrompt(failures: readonly RestorableSubagentFailure[]): string {
+	if (failures.length === 0) return "";
+	const header = "Durable unresolved subagent failures on this session branch (do not replay automatically; use repairOfInvocationId only with an explicit repair objective):";
+	const blocks = failures.slice(-MAX_PROMPT_CHAINS).map((failure) => {
+		const e = failure.evidence;
+		return [
+			`- invocationId=${JSON.stringify(e.invocationId)} agent=${JSON.stringify(e.agent)} status=${e.status} classification=${e.classification ?? "unknown"}`,
+			`  task: ${truncateUtf8(e.task.replace(/\s+/g, " "), 1024)}`,
+			`  outcome: ${truncateUtf8(e.message ?? e.output, 1024)}`,
+			`  sideEffectsMayHaveOccurred=${e.sideEffectsMayHaveOccurred} retryability=${e.retryability}`,
+			...(failure.interruptedRepairInvocationIds.length ? [`  interrupted repairs (not resumed): ${failure.interruptedRepairInvocationIds.join(", ")}`] : []),
+		].join("\n");
+	});
+	return truncateUtf8([header, ...blocks].join("\n"), MAX_PROMPT_BYTES);
+}
+
+function repairTask(objective: string, failure: RestorableSubagentFailure): string {
+	const evidence = failure.evidence;
+	const boundedObjective = truncateUtf8(objective, MAX_TASK_BYTES);
+	const prior = truncateUtf8(JSON.stringify({
+		invocationId: evidence.invocationId,
+		agent: evidence.agent,
+		task: evidence.task,
+		status: evidence.status,
+		classification: evidence.classification,
+		message: evidence.message,
+		output: evidence.output,
+		sideEffectsMayHaveOccurred: evidence.sideEffectsMayHaveOccurred,
+		retryability: evidence.retryability,
+		recentTools: evidence.recentTools,
+	}), MAX_PROMPT_BYTES);
+	return `Explicit repair objective (perform one fresh attempt only):\n${boundedObjective}\n\nBounded prior failure evidence (do not repeat completed or possibly side-effecting work):\n${prior}`;
 }
 
 // ── Config ─────────────────────────────────────────────────────────────
@@ -648,11 +866,50 @@ function agentUnavailableMessage(agentName: string): string {
 	return `Agent is temporarily unavailable due to an active runtime restriction: ${agentName}.`;
 }
 
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "web_search", "web_fetch", "fetch_content"]);
+
+function observedPossibleSideEffects(progress: AgentProgress): boolean {
+	return progress.recentTools.some((event) => !READ_ONLY_TOOLS.has(event.tool));
+}
+
+export function classifySubagentOutcome(evidence: {
+	cancelled: boolean;
+	spawnError?: string;
+	providerError?: string;
+	exitCode: number;
+	error?: string;
+	sideEffectsMayHaveOccurred: boolean;
+}): Pick<AgentResult, "outcome" | "retryability"> {
+	const { cancelled, spawnError, providerError, exitCode, error, sideEffectsMayHaveOccurred } = evidence;
+	if (cancelled) {
+		return {
+			outcome: { status: "cancelled", classification: "cancelled", message: error ?? "Subagent invocation was cancelled." },
+			retryability: sideEffectsMayHaveOccurred ? "unknown" : "retryable",
+		};
+	}
+	if (spawnError) return { outcome: { status: "failed", classification: "spawn_failure", message: spawnError }, retryability: "retryable" };
+	if (providerError) {
+		return {
+			outcome: { status: "failed", classification: "provider_failure", message: providerError },
+			retryability: sideEffectsMayHaveOccurred ? "unknown" : "retryable",
+		};
+	}
+	if (exitCode !== 0) {
+		return {
+			outcome: { status: "failed", classification: "nonzero_exit", message: error ?? `Subagent process exited with code ${exitCode}.` },
+			retryability: "unknown",
+		};
+	}
+	if (error) return { outcome: { status: "failed", classification: "failure", message: error }, retryability: "unknown" };
+	return { outcome: { status: "completed" }, retryability: "not_retryable" };
+}
+
 async function runSubagent(
 	agent: AgentConfig,
 	task: string,
 	cwd: string,
 	settings: SubagentRunSettings,
+	invocation: SubagentInvocationMetadata,
 	signal: AbortSignal | undefined,
 	onUpdate?: (progress: AgentProgress, usage: AgentResult["usage"]) => void,
 ): Promise<AgentResult> {
@@ -677,12 +934,16 @@ async function runSubagent(
 	};
 
 	const result: AgentResult = {
+		...invocation,
 		agent: agent.name,
 		task,
 		output: "",
 		exitCode: 0,
 		model: settings.model,
 		modelName: settings.modelName,
+		outcome: { status: "completed" },
+		sideEffectsMayHaveOccurred: false,
+		retryability: "not_retryable",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 		progress: {
 			agent: agent.name,
@@ -709,6 +970,9 @@ async function runSubagent(
 		onUpdate?.(progress, result.usage);
 	}, 150);
 
+	let spawnError: string | undefined;
+	let providerError: string | undefined;
+	let cancellationObserved = signal?.aborted ?? false;
 	const exitCode = await new Promise<number>((resolve) => {
 		assertSpawnAllowed();
 		// Compute nested visibility at the same synchronous spawn boundary as the
@@ -822,7 +1086,10 @@ async function runSubagent(
 								|| (u.input || 0) + (u.output || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
 						}
 						if (evt.message.model) result.model = evt.message.model;
-						if (evt.message.errorMessage) progress.error = evt.message.errorMessage;
+						if (evt.message.errorMessage) {
+							providerError = evt.message.errorMessage;
+							progress.error = evt.message.errorMessage;
+						}
 
 						const text = extractTextFromContent(evt.message.content);
 						if (text) {
@@ -871,10 +1138,15 @@ async function runSubagent(
 			resolve(code ?? 1);
 		});
 
-		proc.on("error", () => resolve(1));
+		proc.on("error", (error) => {
+			spawnError = error.message;
+			if (!progress.error) progress.error = error.message;
+			resolve(1);
+		});
 
 		if (signal) {
 			const kill = () => {
+				cancellationObserved = true;
 				proc.kill("SIGTERM");
 				setTimeout(() => !proc.killed && proc.kill("SIGKILL"), 3000);
 			};
@@ -892,6 +1164,15 @@ async function runSubagent(
 	progress.status = exitCode === 0 && !progress.error ? "completed" : "failed";
 	progress.durationMs = Date.now() - startTime;
 	if (progress.error) result.output = result.output || `Error: ${progress.error}`;
+	result.sideEffectsMayHaveOccurred = observedPossibleSideEffects(progress);
+	Object.assign(result, classifySubagentOutcome({
+		cancelled: cancellationObserved,
+		spawnError,
+		providerError,
+		exitCode,
+		error: progress.error,
+		sideEffectsMayHaveOccurred: result.sideEffectsMayHaveOccurred,
+	}));
 
 	// Truncate output if very large
 	if (result.output.length > DEFAULT_MAX_BYTES) {
@@ -1525,6 +1806,21 @@ export default function (pi: ExtensionAPI) {
 	};
 	const config = loadConfig();
 	const semaphore = new Semaphore(config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY);
+	let checkpointState: CheckpointState = { failures: new Map(), activeRepairs: new Map() };
+	const restoreCheckpointState = (ctx: ExtensionContext) => {
+		const restored = restoreSubagentCheckpoints(ctx.sessionManager.getBranch());
+		checkpointState = {
+			failures: new Map(restored.map((failure) => [failure.invocationId, failure])),
+			activeRepairs: new Map(),
+		};
+	};
+	const appendCheckpoint = (checkpoint: SubagentCheckpoint) => {
+		if (Buffer.byteLength(JSON.stringify(checkpoint), "utf8") > MAX_CHECKPOINT_ENTRY_BYTES) {
+			throw new Error("Refusing to persist an oversized subagent checkpoint entry.");
+		}
+		pi.appendEntry?.(SUBAGENT_CHECKPOINT_TYPE, checkpoint);
+		applyCheckpoint(checkpointState, checkpoint);
+	};
 	agents = loadAgents();
 
 	// If spawned as a child by a parent subagent process, PI_SUBAGENT_ALLOWED
@@ -1534,6 +1830,33 @@ export default function (pi: ExtensionAPI) {
 	if (SUBAGENT_ALLOWLIST) {
 		agents = agents.filter((a) => SUBAGENT_ALLOWLIST.includes(a.name));
 	}
+
+	pi.on?.("session_start", async (_event, ctx) => restoreCheckpointState(ctx));
+	pi.on?.("session_tree", async (_event, ctx) => restoreCheckpointState(ctx));
+	pi.on?.("before_agent_start", async (event) => {
+		const prompt = formatRestorableFailurePrompt([...checkpointState.failures.values()]);
+		if (!prompt) return;
+		return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
+	});
+
+	pi.registerCommand("subagent-checkpoints", {
+		description: "Show unresolved branch-local subagent failures",
+		handler: async (_args, ctx) => {
+			const failures = [...checkpointState.failures.values()];
+			if (failures.length === 0) {
+				ctx.ui.notify("No unresolved subagent failures on the current branch.", "info");
+				return;
+			}
+			const rows = failures.slice(-MAX_PROMPT_CHAINS).map((failure) => {
+				const interrupted = failure.interruptedRepairInvocationIds.length
+					? `; interrupted repairs: ${failure.interruptedRepairInvocationIds.join(", ")}`
+					: "";
+				return `${failure.invocationId} [${failure.evidence.status}/${failure.evidence.classification ?? "unknown"}] ${failure.evidence.agent}${interrupted}`;
+			});
+			const omitted = failures.length - rows.length;
+			ctx.ui.notify(`Unresolved subagent failures (${failures.length}):\n${rows.join("\n")}${omitted > 0 ? `\n… ${omitted} older restored chain(s) omitted` : ""}`, "warning");
+		},
+	});
 
 	pi.registerCommand("agents", {
 		description: "Manage session-only subagent availability, models, and reasoning",
@@ -1594,8 +1917,9 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: Type.Object({
 			agent: Type.String({ description: "Name of the agent to invoke" }),
-			task: Type.String({ description: "Task description" }),
+			task: Type.String({ description: "Task description or explicit repair objective" }),
 			cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+			repairOfInvocationId: Type.Optional(Type.String({ description: "Unresolved failed/cancelled invocation checkpoint to repair with one fresh child" })),
 		}),
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -1603,6 +1927,14 @@ export default function (pi: ExtensionAPI) {
 
 			if (!params.agent || !params.task) {
 				throw new Error("`subagent` requires both `agent` and `task`. To fan out work, emit multiple `subagent` tool calls in the same turn — they run in parallel.");
+			}
+			const repairOfInvocationId = params.repairOfInvocationId?.trim();
+			const repairFailure = repairOfInvocationId ? checkpointState.failures.get(repairOfInvocationId) : undefined;
+			if (repairOfInvocationId && !repairFailure) {
+				throw new Error(`repairOfInvocationId is not a restorable unresolved failed/cancelled checkpoint on this branch: ${repairOfInvocationId}`);
+			}
+			if (repairOfInvocationId && [...checkpointState.activeRepairs.values()].some((repair) => repair.repairOfInvocationId === repairOfInvocationId)) {
+				throw new Error(`A repair is already running for invocation ${repairOfInvocationId}; it will not be resumed or duplicated.`);
 			}
 
 			const agent = agents.find((a) => a.name === params.agent);
@@ -1618,7 +1950,31 @@ export default function (pi: ExtensionAPI) {
 			const contextWindow = effective.resolvedModel?.contextWindow;
 			const effectiveModelName = effective.resolvedModel?.name;
 			const effectiveSettings: SubagentRunSettings = { model: effective.model, thinking: effective.thinking, modelName: effectiveModelName };
+			const invocation: SubagentInvocationMetadata = {
+				invocationId: toolCallId,
+				attempt: { number: 1, maxAttempts: 1 },
+				context: {
+					agent: params.agent,
+					task: params.task,
+					cwd: params.cwd ?? cwd,
+					model: effective.model,
+					thinking: effective.thinking,
+				},
+			};
+			const executionTask = repairFailure ? repairTask(params.task, repairFailure) : params.task;
+			if (repairOfInvocationId) {
+				appendCheckpoint({
+					version: SUBAGENT_CHECKPOINT_VERSION,
+					kind: "repair-started",
+					invocationId: toolCallId,
+					repairOfInvocationId,
+					objective: truncateUtf8(params.task, MAX_TASK_BYTES),
+					recordedAt: Date.now(),
+				});
+			}
 			const liveResult: AgentResult = {
+				...invocation,
+				...(repairOfInvocationId ? { repairOfInvocationId } : {}),
 				agent: params.agent,
 				task: params.task,
 				output: "",
@@ -1626,30 +1982,64 @@ export default function (pi: ExtensionAPI) {
 				model: effective.model,
 				modelName: effectiveModelName,
 				contextWindow,
+				outcome: { status: "completed" },
+				sideEffectsMayHaveOccurred: false,
+				retryability: "not_retryable",
 				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 				progress: { agent: params.agent, status: "running" as const, task: params.task, recentTools: [], toolCount: 0, tokens: 0, durationMs: 0, lastMessage: "" },
 			};
 
-			const result = await semaphore.run(() => {
-				// Re-check at the actual spawn boundary in case this call waited for a
-				// concurrency slot while session availability or workflow policy changed.
-				const liveWorkflowBlock = workflowAgentBlockMessage(agent.name);
-				if (liveWorkflowBlock) throw new Error(liveWorkflowBlock);
-				if (!isAgentEnabled(agent.name)) throw new Error(agentUnavailableMessage(agent.name));
-				return runSubagent(agent, params.task!, params.cwd ?? cwd, effectiveSettings, signal, (progress, usage) => {
-					liveResult.progress = progress;
-					liveResult.usage = { ...usage };
-					onUpdate?.({
-						content: [{ type: "text", text: "(running...)" }],
-						details: { results: [liveResult] },
+			let result: AgentResult;
+			try {
+				result = await semaphore.run(() => {
+					// Re-check at the actual spawn boundary in case this call waited for a
+					// concurrency slot while session availability or workflow policy changed.
+					const liveWorkflowBlock = workflowAgentBlockMessage(agent.name);
+					if (liveWorkflowBlock) throw new Error(liveWorkflowBlock);
+					if (!isAgentEnabled(agent.name)) throw new Error(agentUnavailableMessage(agent.name));
+					return runSubagent(agent, executionTask, params.cwd ?? cwd, effectiveSettings, invocation, signal, (progress, usage) => {
+						liveResult.progress = progress;
+						liveResult.usage = { ...usage };
+						onUpdate?.({
+							content: [{ type: "text", text: "(running...)" }],
+							details: { results: [liveResult] },
+						});
 					});
 				});
-			});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const cancelled = signal?.aborted ?? false;
+				result = {
+					...liveResult,
+					output: `Error: ${message}`,
+					exitCode: 1,
+					outcome: { status: cancelled ? "cancelled" : "failed", classification: cancelled ? "cancelled" : "failure", message },
+					retryability: cancelled ? "retryable" : "unknown",
+					progress: { ...liveResult.progress, status: "failed", error: message },
+				};
+			}
 
+			result.context.task = params.task;
+			result.task = params.task;
+			if (repairOfInvocationId) result.repairOfInvocationId = repairOfInvocationId;
 			result.contextWindow = contextWindow;
 			if (!result.modelName) result.modelName = effectiveModelName;
 			liveResult.modelName = result.modelName;
-			const isError = result.exitCode !== 0 || !!result.progress.error;
+			const recordedAt = Date.now();
+			const evidence = checkpointFromResult(result, recordedAt);
+			if (repairOfInvocationId) {
+				appendCheckpoint({
+					version: SUBAGENT_CHECKPOINT_VERSION,
+					kind: "repair-finished",
+					invocationId: toolCallId,
+					repairOfInvocationId,
+					evidence,
+					recordedAt,
+				});
+			} else if (result.outcome.status === "failed" || result.outcome.status === "cancelled") {
+				appendCheckpoint({ version: SUBAGENT_CHECKPOINT_VERSION, kind: "failure", evidence });
+			}
+			const isError = result.outcome.status !== "completed";
 			return {
 				content: [{ type: "text", text: result.output || "(no output)" }],
 				details: { results: [result] },

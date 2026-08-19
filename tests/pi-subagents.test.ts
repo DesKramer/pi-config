@@ -13,11 +13,15 @@ import extension, {
 	buildAgentsMenuItems,
 	buildModelItems,
 	buildThinkingItems,
+	classifySubagentOutcome,
+	formatRestorableFailurePrompt,
 	filterSelectItems,
 	formatAgentsSummary,
 	listAgents,
 	resolveNestedSubagentAllowlist,
+	restoreSubagentCheckpoints,
 	runAgentSettingsWizard,
+	SUBAGENT_CHECKPOINT_TYPE,
 	type AgentConfig,
 	type AgentSettingsPickOptions,
 } from "../extensions/pi-subagents/index.ts";
@@ -454,6 +458,265 @@ test("registered /agents command toggles availability without refreshing models"
 	assert.equal(refreshes, 0);
 	assert.equal(listAgents().find((agent) => agent.name === displayedAgent.name)?.enabled, false);
 	assert.match(notifications[0].message, /is now disabled/);
+});
+
+test("failure classification is conservative across observable child outcomes", () => {
+	assert.deepEqual(classifySubagentOutcome({ cancelled: false, spawnError: "ENOENT", exitCode: 1, sideEffectsMayHaveOccurred: false }), {
+		outcome: { status: "failed", classification: "spawn_failure", message: "ENOENT" },
+		retryability: "retryable",
+	});
+	assert.deepEqual(classifySubagentOutcome({ cancelled: false, providerError: "quota", exitCode: 0, sideEffectsMayHaveOccurred: true }), {
+		outcome: { status: "failed", classification: "provider_failure", message: "quota" },
+		retryability: "unknown",
+	});
+	assert.equal(classifySubagentOutcome({ cancelled: true, exitCode: 1, sideEffectsMayHaveOccurred: false }).outcome.classification, "cancelled");
+	assert.deepEqual(classifySubagentOutcome({ cancelled: false, exitCode: 7, error: "child stderr", sideEffectsMayHaveOccurred: true }), {
+		outcome: { status: "failed", classification: "nonzero_exit", message: "child stderr" },
+		retryability: "unknown",
+	});
+	assert.equal(classifySubagentOutcome({ cancelled: false, exitCode: 0, error: "unclassified", sideEffectsMayHaveOccurred: false }).outcome.classification, "failure");
+});
+
+test("failed execution returns stable invocation context and partial evidence without replay", async () => {
+	const tools: any[] = [];
+	extension({ registerCommand: () => {}, registerTool: (tool: unknown) => tools.push(tool) } as any);
+	const tool = tools[0];
+	const displayedAgent = listAgents()[0];
+	assert.ok(displayedAgent);
+
+	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-failure-test-"));
+	const runnerPath = path.join(tempDir, "failing-child.mjs");
+	fs.writeFileSync(runnerPath, `
+process.stdout.write(JSON.stringify({ type: "tool_execution_start", toolName: "edit", toolCallId: "partial-tool", args: { path: "changed.ts" } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "partial child output" }] } }) + "\\n");
+process.stderr.write("child failed after partial work\\n");
+process.exitCode = 7;
+`);
+	const previousEntry = process.argv[1];
+	try {
+		process.argv[1] = runnerPath;
+		const result = await tool.execute(
+			"logical-call-123",
+			{ agent: displayedAgent.name, task: "Perform one bounded task.", cwd: tempDir },
+			undefined,
+			undefined,
+			{ cwd: process.cwd(), modelRegistry: { getAll: () => [] } },
+		);
+		assert.equal(result.isError, true);
+		const evidence = result.details.results[0];
+		assert.equal(evidence.invocationId, "logical-call-123");
+		assert.deepEqual(evidence.attempt, { number: 1, maxAttempts: 1 });
+		assert.deepEqual(evidence.context, {
+			agent: displayedAgent.name,
+			task: "Perform one bounded task.",
+			cwd: tempDir,
+			model: evidence.model,
+			thinking: displayedAgent.thinking,
+		});
+		assert.deepEqual(evidence.outcome, { status: "failed", classification: "nonzero_exit", message: "child failed after partial work" });
+		assert.equal(evidence.output, "partial child output");
+		assert.equal(evidence.progress.recentTools[0].tool, "edit");
+		assert.equal(evidence.sideEffectsMayHaveOccurred, true);
+		assert.equal(evidence.retryability, "unknown");
+	} finally {
+		if (previousEntry === undefined) delete process.argv[1];
+		else process.argv[1] = previousEntry;
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("normal tasks over eight KiB reach the child while checkpoint snapshots stay bounded", async () => {
+	const entries: any[] = [];
+	const tools: any[] = [];
+	extension({
+		registerCommand: () => {},
+		registerTool: (tool: unknown) => tools.push(tool),
+		appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
+	} as any);
+	const displayedAgent = listAgents()[0];
+	assert.ok(displayedAgent);
+
+	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-long-task-test-"));
+	const runnerPath = path.join(tempDir, "capture-long-task.mjs");
+	const capturePath = path.join(tempDir, "captured-task.txt");
+	fs.writeFileSync(runnerPath, `
+import fs from "node:fs";
+const taskArg = process.argv.slice(2).find((arg) => arg.startsWith("@"));
+if (!taskArg) throw new Error("expected long task file argument");
+fs.writeFileSync(process.env.PI_SUBAGENT_LONG_TASK_CAPTURE, fs.readFileSync(taskArg.slice(1), "utf8"));
+process.stderr.write("intentional checkpoint failure\\n");
+process.exitCode = 7;
+`);
+	const longTask = "ordinary task payload ".repeat(500);
+	assert.ok(Buffer.byteLength(longTask, "utf8") > 8 * 1024);
+	const previousEntry = process.argv[1];
+	const previousCapture = process.env.PI_SUBAGENT_LONG_TASK_CAPTURE;
+	try {
+		process.argv[1] = runnerPath;
+		process.env.PI_SUBAGENT_LONG_TASK_CAPTURE = capturePath;
+		const failed = await tools[0].execute(
+			"long-normal-task",
+			{ agent: displayedAgent.name, task: longTask, cwd: tempDir },
+			undefined,
+			undefined,
+			{ cwd: tempDir, modelRegistry: { getAll: () => [] } },
+		);
+
+		assert.equal(failed.isError, true);
+		assert.equal(fs.readFileSync(capturePath, "utf8"), `Task: ${longTask}`);
+		assert.equal(failed.details.results[0].context.task, longTask);
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0].data.kind, "failure");
+		assert.ok(Buffer.byteLength(entries[0].data.evidence.task, "utf8") <= 8 * 1024);
+		assert.notEqual(entries[0].data.evidence.task, longTask);
+	} finally {
+		if (previousEntry === undefined) delete process.argv[1];
+		else process.argv[1] = previousEntry;
+		if (previousCapture === undefined) delete process.env.PI_SUBAGENT_LONG_TASK_CAPTURE;
+		else process.env.PI_SUBAGENT_LONG_TASK_CAPTURE = previousCapture;
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("durable branch restoration links one fresh repair and treats unfinished repairs as interrupted", async () => {
+	const entries: any[] = [];
+	const firstTools: any[] = [];
+	const firstEvents = new Map<string, any>();
+	extension({
+		registerCommand: () => {},
+		registerTool: (tool: unknown) => firstTools.push(tool),
+		on: (name: string, handler: unknown) => firstEvents.set(name, handler),
+		appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
+	} as any);
+	const displayedAgent = listAgents()[0];
+	assert.ok(displayedAgent);
+
+	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-checkpoint-test-"));
+	const failingRunner = path.join(tempDir, "failing.mjs");
+	const repairRunner = path.join(tempDir, "repair.mjs");
+	const capturePath = path.join(tempDir, "repair-args.json");
+	fs.writeFileSync(failingRunner, `
++for (let i = 0; i < 25; i++) process.stdout.write(JSON.stringify({ type: "tool_execution_start", toolName: "edit", toolCallId: "t" + i, args: { path: "changed-" + i + ".ts" } }) + "\\n");
++process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "partial evidence" }] } }) + "\\n");
++process.stderr.write("repairable failure\\n");
++process.exitCode = 7;
++`.replace(/^\+/gm, ""));
+	fs.writeFileSync(repairRunner, `
++import fs from "node:fs";
++fs.writeFileSync(process.env.PI_SUBAGENT_REPAIR_CAPTURE, JSON.stringify(process.argv.slice(2)));
++process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "repair complete" }] } }) + "\\n");
++`.replace(/^\+/gm, ""));
+
+	const previousEntry = process.argv[1];
+	const previousCapture = process.env.PI_SUBAGENT_REPAIR_CAPTURE;
+	try {
+		process.argv[1] = failingRunner;
+		const failed = await firstTools[0].execute(
+			"failed-original",
+			{ agent: displayedAgent.name, task: "Fix the parser once.", cwd: tempDir },
+			undefined,
+			undefined,
+			{ cwd: tempDir, modelRegistry: { getAll: () => [] } },
+		);
+		assert.equal(failed.isError, true);
+		assert.equal(entries.length, 1, "failure checkpoint is appended before the terminal result returns");
+		assert.equal(entries[0].customType, SUBAGENT_CHECKPOINT_TYPE);
+		assert.equal(entries[0].data.kind, "failure");
+		assert.equal(entries[0].data.version, 1);
+		assert.equal(entries[0].data.evidence.recentTools.length, 20);
+		assert.ok(Buffer.byteLength(JSON.stringify(entries[0].data), "utf8") <= 64 * 1024);
+
+		// A branch containing only repair-started keeps the target unresolved and
+		// marks the now-nonexistent child as interrupted rather than resumable.
+		const interrupted = restoreSubagentCheckpoints([
+			entries[0],
+			{ type: "custom", customType: SUBAGENT_CHECKPOINT_TYPE, data: {
+				version: 1,
+				kind: "repair-started",
+				invocationId: "repair-interrupted",
+				repairOfInvocationId: "failed-original",
+				objective: "repair it",
+				recordedAt: Date.now(),
+			} },
+		]);
+		assert.deepEqual(interrupted[0].interruptedRepairInvocationIds, ["repair-interrupted"]);
+
+		const secondTools: any[] = [];
+		const secondEvents = new Map<string, any>();
+		extension({
+			registerCommand: () => {},
+			registerTool: (tool: unknown) => secondTools.push(tool),
+			on: (name: string, handler: unknown) => secondEvents.set(name, handler),
+			appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
+		} as any);
+		await secondEvents.get("session_start")({}, { sessionManager: { getBranch: () => [...entries] } });
+
+		await assert.rejects(
+			secondTools[0].execute("bad-repair", { agent: displayedAgent.name, task: "No guessing.", repairOfInvocationId: "other-branch" }, undefined, undefined, { cwd: tempDir, modelRegistry: { getAll: () => [] } }),
+			/not a restorable unresolved failed\/cancelled checkpoint on this branch/,
+		);
+
+		process.argv[1] = repairRunner;
+		process.env.PI_SUBAGENT_REPAIR_CAPTURE = capturePath;
+		const repaired = await secondTools[0].execute(
+			"repair-new-id",
+			{ agent: displayedAgent.name, task: "Repair only the parser assertion.", cwd: tempDir, repairOfInvocationId: "failed-original" },
+			undefined,
+			undefined,
+			{ cwd: tempDir, modelRegistry: { getAll: () => [] } },
+		);
+		assert.equal(repaired.isError, undefined);
+		assert.equal(repaired.details.results[0].invocationId, "repair-new-id");
+		assert.equal(repaired.details.results[0].repairOfInvocationId, "failed-original");
+		assert.deepEqual(entries.slice(-2).map((entry) => entry.data.kind), ["repair-started", "repair-finished"]);
+		const childArgs = JSON.parse(fs.readFileSync(capturePath, "utf8")).join(" ");
+		assert.match(childArgs, /Explicit repair objective/);
+		assert.match(childArgs, /Repair only the parser assertion/);
+		assert.match(childArgs, /failed-original/);
+		assert.equal(restoreSubagentCheckpoints(entries).length, 0, "successful linked repair resolves the chain after restart");
+	} finally {
+		if (previousEntry === undefined) delete process.argv[1];
+		else process.argv[1] = previousEntry;
+		if (previousCapture === undefined) delete process.env.PI_SUBAGENT_REPAIR_CAPTURE;
+		else process.env.PI_SUBAGENT_REPAIR_CAPTURE = previousCapture;
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("unresolved failure prompt exposure is limited to five chains and twelve KiB", () => {
+	const entries = Array.from({ length: 60 }, (_, index) => ({
+		type: "custom",
+		customType: SUBAGENT_CHECKPOINT_TYPE,
+		data: {
+			version: 1,
+			kind: "failure",
+			evidence: {
+				invocationId: `failure-${index}`,
+				agent: "worker",
+				task: "x".repeat(8000),
+				cwd: "/tmp",
+				model: "test/model",
+				thinking: "medium",
+				status: "failed",
+				classification: "failure",
+				message: "boom",
+				output: "y".repeat(16000),
+				exitCode: 1,
+				sideEffectsMayHaveOccurred: false,
+				retryability: "unknown",
+				recentTools: [],
+				recordedAt: index,
+			},
+		},
+	}));
+	const restored = restoreSubagentCheckpoints(entries);
+	assert.equal(restored.length, 50);
+	assert.equal(restored[0].invocationId, "failure-10");
+	const prompt = formatRestorableFailurePrompt(restored);
+	assert.ok(Buffer.byteLength(prompt, "utf8") <= 12 * 1024);
+	assert.doesNotMatch(prompt, /failure-54/);
+	assert.match(prompt, /failure-55/);
+	assert.match(prompt, /failure-59/);
 });
 
 test("subagent execution distinguishes disabled profiles from unknown names before spawning", async () => {

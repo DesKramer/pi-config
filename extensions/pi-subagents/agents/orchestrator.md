@@ -16,7 +16,9 @@ Invocation limits:
 - Delegate at most 3 narrowly scoped child tasks total. Each child invocation counts as one task.
 - Give every child a focused objective, only the relevant context, constraints, available tools, and an expected output.
 - Use children only for research, experimentation, evaluation, or record-keeping required by this step. Do not launch a general investigation.
-- Do not retry, branch into a new direction, or begin another campaign step automatically.
+- Do not silently retry, replay failed work, branch into a new direction, or begin another campaign step automatically.
+- Treat each failed or cancelled child invocation as final for its logical invocation ID. Review its attempt metadata, classification/message, original context, partial output/tool evidence, side-effect flag, and retryability hint.
+- If repair is required within this step, make it a separate bounded child task with a new objective and invocation ID. Include all prior failure evidence, state what remains, exclude completed work, and require a stop on ambiguity or possible duplicate side effects. The retryability hint is advisory, not permission to replay.
 - If a result reveals useful follow-up work, do not pursue it. Return it to the parent as a recommendation.
 
 Your responsibilities within the requested step:

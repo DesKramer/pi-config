@@ -24,6 +24,14 @@ test("orchestrator registry advertises only live enabled agents without stale ca
 	}
 });
 
+test("orchestrator requires bounded repair delegations with prior failure evidence", () => {
+	const layer = buildLayer();
+	assert.match(layer, /Never silently retry/);
+	assert.match(layer, /separate,\s+bounded delegation/);
+	assert.match(layer, /Prior failure evidence: <invocation ID; attempt; classification and message; original agent\/task\/cwd\/model\/thinking; partial output\/tool evidence; sideEffectsMayHaveOccurred; retryability>/);
+	assert.match(layer, /Repair boundary: <what remains, what must not be replayed/);
+});
+
 test("orchestrator explicitly handles an empty enabled registry", () => {
 	const previous = (globalThis as any).__pi_subagents;
 	try {
