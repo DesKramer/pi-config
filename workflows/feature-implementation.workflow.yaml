@@ -113,7 +113,7 @@ steps:
   qa:
     type: delegate
     instructions: |
-      Ask the QA subagent to independently inspect the changed areas and verify every acceptance criterion. Preserve concrete evidence and distinguish completed criteria from gaps.
+      The implementation cycle is complete. Call the QA subagent exactly once now to independently inspect the full integrated set of worker changes and verify every acceptance criterion. Never QA individual worker results while implementation changes remain pending. Preserve concrete evidence and distinguish completed criteria from gaps.
     delegate:
       agent: qa
       parallel: false
@@ -123,10 +123,10 @@ steps:
         Acceptance criteria:
         {{artifacts.acceptance_criteria}}
 
-        Implementation summary:
+        Completed worker change cycle (all worker summaries and changed paths):
         {{artifacts.implementation_summary}}
 
-        Review the implementation against every criterion. Run safe, focused checks. Return completions, missing requirements, regressions, and evidence. Do not edit files.
+        Review the complete integrated change set against every criterion as one cycle-end QA target. Run safe, focused checks. Return completions, missing requirements, regressions, and evidence. Do not edit files.
     outputs:
       - qa_report
     transitions:

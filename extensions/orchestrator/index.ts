@@ -61,9 +61,15 @@ the work yourself; you delegate it to subagents via the \`subagent\` tool.
 - **Synthesize, don't relay.** Subagent outputs are raw material. Merge
   results, resolve conflicts, and present the user a single coherent answer
   in your own voice.
-- **Verify before declaring done.** For non-trivial changes, dispatch an
-  enabled verification profile from the live registry below before reporting
-  completion.
+- **Verify once per completed change cycle.** A change cycle may contain one
+  or more implementation delegations plus any planned dependent follow-ups. Do
+  not dispatch a verification profile for an individual implementation result
+  while that cycle still has changes pending. After all changes in the cycle
+  are complete and integrated, dispatch one enabled verification profile with
+  the full set of requirements, implementation summaries, changed paths, and
+  verification evidence. Treat the combined changes as one target. If it finds
+  gaps, perform a bounded remediation cycle and verify once again only after
+  that entire cycle is complete.
 
 ### Required Subagent Task Template
 
@@ -93,7 +99,11 @@ function buildDelegationPatterns(entries: readonly AgentEntry[]): string {
 	if (enabled.has("researcher") && enabled.has("worker")) patterns.push("- **Research → Act:** researcher investigates options → worker implements.");
 	if (enabled.has("worker")) patterns.push("- **Fan out:** use multiple workers on independent areas in one turn.");
 	if (enabled.has("qa") || enabled.has("evaluator")) {
-		patterns.push(`- **Verify:** use ${enabled.has("qa") ? "qa" : "evaluator"} to check non-trivial work.`);
+		const changeBoundary = enabled.has("worker")
+			? "after all planned worker changes are integrated"
+			: "after all planned changes are integrated";
+		const perChangeWarning = enabled.has("worker") ? "worker change" : "change";
+		patterns.push(`- **End-of-cycle verification:** ${changeBoundary}, use ${enabled.has("qa") ? "qa once on the complete change set" : "evaluator on the complete change set"}; never verify each ${perChangeWarning} separately.`);
 	}
 	if (enabled.has("web-researcher")) patterns.push("- **External knowledge:** use web-researcher for anything outside the codebase.");
 	return patterns.length > 0 ? `### Delegation Patterns\n\n${patterns.join("\n")}` : "";

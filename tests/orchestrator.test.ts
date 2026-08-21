@@ -32,6 +32,25 @@ test("orchestrator requires bounded repair delegations with prior failure eviden
 	assert.match(layer, /Repair boundary: <what remains, what must not be replayed/);
 });
 
+test("orchestrator runs QA once after the complete worker change cycle", () => {
+	const previous = (globalThis as any).__pi_subagents;
+	try {
+		(globalThis as any).__pi_subagents = {
+			listAgents: () => [
+				{ name: "worker", description: "Writes code", tools: ["read", "edit"], enabled: true },
+				{ name: "qa", description: "Checks integrated changes", tools: ["read"], enabled: true },
+			],
+		};
+		const layer = buildLayer();
+		assert.match(layer, /Verify once per completed change cycle/);
+		assert.match(layer, /Do\s+not dispatch a verification profile for an individual implementation result\s+while that cycle still has changes pending/);
+		assert.match(layer, /after all planned worker changes are integrated, use qa once on the complete change set/);
+		assert.match(layer, /never verify each worker change separately/);
+	} finally {
+		(globalThis as any).__pi_subagents = previous;
+	}
+});
+
 test("orchestrator explicitly handles an empty enabled registry", () => {
 	const previous = (globalThis as any).__pi_subagents;
 	try {

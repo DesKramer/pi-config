@@ -12,7 +12,7 @@ A [pi](https://github.com/earendil-works/pi) extension that registers a single `
 | **web-researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | openai-codex/gpt-5.6-sol (max) | Web research |
 | **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory | openai-codex/gpt-5.6-sol (max) | Code changes with explicit local-memory search/add (can dispatch scout/web-researcher to protect its own context) |
 | **acceptance-criteria** | read, grep, find | openai-codex/gpt-5.6-sol (max) | Derives testable acceptance criteria and identifies ambiguities |
-| **qa** | read, grep, find, safe_bash | openai-codex/gpt-5.6-sol (max) | Runs focused read-only QA and reports evidence |
+| **qa** | read, grep, find, safe_bash | openai-codex/gpt-5.6-sol (max) | QA gate for a completed, integrated cycle of worker changes |
 
 Agent recursion is constrained with `subagent_agents` allowlists. The orchestrator can dispatch researcher, experimenter, and evaluator; nested agents can only dispatch their compatible focused helpers.
 
