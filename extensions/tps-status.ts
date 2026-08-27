@@ -43,8 +43,11 @@ type CodexAuthRegistry = {
 };
 
 class CodexUsageFailureError extends Error {
-	constructor(readonly failure: CodexUsageFailure) {
+	readonly failure: CodexUsageFailure;
+
+	constructor(failure: CodexUsageFailure) {
 		super("Codex usage failure");
+		this.failure = failure;
 	}
 }
 
@@ -145,15 +148,23 @@ function decodeCodexAccountId(token: string): string | undefined {
 }
 
 function formatWindowDuration(seconds: number): string {
+	if (seconds === 0) return "0s";
 	if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
 	if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
 	if (seconds % 60 === 0) return `${seconds / 60}m`;
 	return `${seconds}s`;
 }
 
-function formatCodexUsage(usage: CodexUsage): string {
-	const formatWindow = (window: CodexUsageWindow) =>
-		`${formatWindowDuration(window.limitWindowSeconds)} ${Math.round(100 - window.usedPercent)}%`;
+export function formatCodexUsage(
+	usage: CodexUsage,
+	nowUnixSeconds = Math.floor(Date.now() / 1000),
+): string {
+	const formatWindow = (window: CodexUsageWindow) => {
+		const remainingSeconds = window.resetAt === undefined
+			? window.limitWindowSeconds
+			: Math.max(0, window.resetAt - nowUnixSeconds);
+		return `${formatWindowDuration(remainingSeconds)} ${Math.round(100 - window.usedPercent)}%`;
+	};
 	return [usage.primary, usage.secondary]
 		.filter((window): window is CodexUsageWindow => window !== undefined)
 		.map(formatWindow)
