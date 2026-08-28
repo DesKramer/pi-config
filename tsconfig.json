@@ -14,6 +14,7 @@
     "extensions/pi-subagents/index.ts",
     "extensions/orchestrator/**/*.ts",
     "extensions/remote-pi/**/*.ts",
+    "extensions/plug/**/*.ts",
     "extensions/claude-code-provider/**/*.ts",
     "tests/**/*.ts"
   ]
