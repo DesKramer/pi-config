@@ -62,6 +62,7 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `custom-providers.ts` | Registers custom providers from `config/models.json`. |
 | `ephemeral.ts` | Ephemeral/session helper extension. |
 | `firecrawl-tools.ts` | Firecrawl search/scrape tools. |
+| `fuzzy-file-autocomplete.ts` | Extends `@` file completion with one-edit typo tolerance using a bounded, ignore-aware `fd` index. |
 | `git-status-widget.ts` | Git status widget/status display. |
 | `mem0.ts` | Optional self-hosted Mem0 OSS memory integration with bounded project recall, explicit capture/search tools, and status diagnostics. |
 | `orchestrator/` | Live-registry orchestration prompt layer that yields to active workflows. |

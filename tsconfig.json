@@ -16,6 +16,7 @@
     "extensions/remote-pi/**/*.ts",
     "extensions/plug/**/*.ts",
     "extensions/claude-code-provider/**/*.ts",
+    "extensions/fuzzy-file-autocomplete.ts",
     "tests/**/*.ts"
   ]
 }
