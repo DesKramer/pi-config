@@ -44,7 +44,7 @@ One tool call = one subagent:
 
 To fan out, emit multiple `subagent` tool calls in the same assistant turn — pi runs them in parallel automatically. A per-process semaphore caps simultaneous subagents at `maxConcurrency` (default 4); calls past the cap wait their turn.
 
-Each subagent runs as an isolated `pi` process with no inherited context — all context must be in the task description. Ordinary task descriptions are not size-limited by this extension; long tasks are passed to the child through a temporary file.
+Each subagent runs as an isolated `pi` process with no inherited context — all context must be in the task description. Child processes retain Pi's normal skill discovery, so configured global and project skills are available through standard skill loading. Ordinary task descriptions are not size-limited by this extension; long tasks are passed to the child through a temporary file.
 
 ## Config
 
