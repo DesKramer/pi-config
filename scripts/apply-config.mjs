@@ -7,6 +7,13 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const piDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const configDir = join(repoRoot, "config");
+const computerUsePackagePath = join(repoRoot, "vendor", "pi-computer-use");
+
+function isComputerUsePackageSource(value) {
+  if (typeof value !== "string") return false;
+  if (/^npm:@injaneity\/pi-computer-use(?:@.*)?$/.test(value)) return true;
+  return resolve(value) === computerUsePackagePath;
+}
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -30,10 +37,11 @@ function uniqueArray(values) {
 function mergeSettings(existing, managed) {
   const merged = { ...existing, ...managed };
 
-  // Packages should be additive so machine-local packages are preserved.
-  if (Array.isArray(existing.packages) || Array.isArray(managed.packages)) {
-    merged.packages = uniqueArray([...(existing.packages ?? []), ...(managed.packages ?? [])]);
-  }
+  // Packages are additive, except this repository owns the computer-use source.
+  // Drop npm and duplicate vendored registrations before installing one absolute path.
+  merged.packages = uniqueArray([...(existing.packages ?? []), ...(managed.packages ?? [])])
+    .filter((value) => !isComputerUsePackageSource(value));
+  merged.packages.push(computerUsePackagePath);
 
   // These are intentionally machine-local. This repo does not manage them.
   for (const key of ["skills", "extensions", "prompts", "themes", "lastChangelogVersion", "trackingId"]) {
@@ -66,6 +74,14 @@ if (existsSync(settingsSource)) {
   backup(target);
   writeJson(target, mergeSettings(existing, managed));
   console.log(`Applied settings -> ${target}`);
+}
+
+const computerUseConfigSource = join(configDir, "pi-computer-use.json");
+if (existsSync(computerUseConfigSource)) {
+  const target = join(piDir, "extensions", "pi-computer-use.json");
+  backup(target);
+  writeJson(target, readJson(computerUseConfigSource));
+  console.log(`Applied computer-use config -> ${target}`);
 }
 
 const modelsSource = join(configDir, "models.json");

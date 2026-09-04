@@ -288,7 +288,7 @@ test("nested subagent availability intersects profile allowlists without broaden
 	assert.deepEqual(resolveNestedSubagentAllowlist(unrestricted, agentList), ["researcher", "worker", "orchestrator"]);
 });
 
-test("nested child prompt advertises only profiles in its effective allowlist", async () => {
+test("nested child prompt advertises only allowed profiles and retains normal skill discovery", async () => {
 	const tools: any[] = [];
 	extension({ registerCommand: () => {}, registerTool: (tool: unknown) => tools.push(tool) } as any);
 	const tool = tools[0];
@@ -336,6 +336,7 @@ import fs from "node:fs";
 const promptFlag = process.argv.indexOf("--append-system-prompt");
 if (promptFlag < 0 || !process.argv[promptFlag + 1]) throw new Error("missing child prompt path");
 fs.writeFileSync(process.env.PI_SUBAGENT_TEST_CAPTURE_PATH, JSON.stringify({
+  args: process.argv.slice(2),
   prompt: fs.readFileSync(process.argv[promptFlag + 1], "utf8"),
   allowed: process.env.PI_SUBAGENT_ALLOWED,
   allowlistSet: process.env.PI_SUBAGENT_ALLOWLIST_SET,
@@ -359,10 +360,12 @@ fs.writeFileSync(process.env.PI_SUBAGENT_TEST_CAPTURE_PATH, JSON.stringify({
 		);
 
 		const captured = JSON.parse(fs.readFileSync(capturePath, "utf8")) as {
+			args: string[];
 			prompt: string;
 			allowed?: string;
 			allowlistSet?: string;
 		};
+		assert.equal(captured.args.includes("--no-skills"), false, "child startup must retain Pi's normal skill discovery");
 		assert.equal(captured.allowed, allowedName);
 		assert.equal(captured.allowlistSet, "1");
 		assert.doesNotMatch(captured.prompt, /\bscout\b/i);

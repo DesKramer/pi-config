@@ -1,0 +1,5 @@
+{
+  "browser_use": true,
+  "managed_browser": "chrome",
+  "user_data_dir": "~/.pi/browser-profiles/agent"
+}

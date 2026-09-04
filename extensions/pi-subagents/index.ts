@@ -750,7 +750,7 @@ async function buildPiArgs(
 		await fs.promises.writeFile(promptPath, agent.systemPrompt, { encoding: "utf-8", mode: 0o600 });
 	});
 
-	const args = [...piBin.baseArgs, "--mode", "json", "-p", "--no-session", "--no-skills"];
+	const args = [...piBin.baseArgs, "--mode", "json", "-p", "--no-session"];
 
 	// Separate builtin tools from custom tools. Both kinds share the same
 	// --tools allowlist in pi; --no-tools would disable extension tools too.
