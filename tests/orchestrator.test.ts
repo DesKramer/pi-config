@@ -61,17 +61,49 @@ test("orchestrator explicitly handles an empty enabled registry", () => {
 	}
 });
 
+test("orchestrator defaults off, toggles per instance, and resets on reinitialization", async () => {
+	const previousWorkflow = (globalThis as any).__pi_workflow;
+	const handlers = new Map<string, any>();
+	const commands = new Map<string, any>();
+	const notifications: string[] = [];
+	const pi = {
+		registerCommand: (name: string, command: unknown) => commands.set(name, command),
+		on: (event: string, handler: unknown) => handlers.set(event, handler),
+	};
+	const ctx = { ui: { notify: (message: string) => notifications.push(message) } };
+	const event = { systemPrompt: "base" };
+	try {
+		(globalThis as any).__pi_workflow = undefined;
+		orchestratorExtension(pi as any);
+		assert.equal(await handlers.get("before_agent_start")(event), undefined);
+
+		await commands.get("orchestrator").handler("", ctx);
+		assert.match((await handlers.get("before_agent_start")(event)).systemPrompt, /^base\n\n## Orchestration Mode/);
+		await commands.get("orchestrator").handler("", ctx);
+		assert.equal(await handlers.get("before_agent_start")(event), undefined);
+		assert.deepEqual(notifications, ["Orchestration Mode enabled", "Orchestration Mode disabled"]);
+
+		await commands.get("orchestrator").handler("", ctx);
+		orchestratorExtension(pi as any);
+		assert.equal(await handlers.get("before_agent_start")(event), undefined);
+	} finally {
+		(globalThis as any).__pi_workflow = previousWorkflow;
+	}
+});
+
 test("orchestrator yields prompt ownership to a running workflow and resumes afterward", async () => {
 	const previousWorkflow = (globalThis as any).__pi_workflow;
 	const handlers = new Map<string, any>();
+	const commands = new Map<string, any>();
 	let running = false;
 	try {
 		(globalThis as any).__pi_workflow = { isRunning: () => running };
 		orchestratorExtension({
-			registerCommand: () => {},
+			registerCommand: (name: string, command: unknown) => commands.set(name, command),
 			on: (event: string, handler: unknown) => handlers.set(event, handler),
 		} as any);
 		const beforeAgentStart = handlers.get("before_agent_start");
+		await commands.get("orchestrator").handler("", { ui: { notify: () => {} } });
 
 		assert.equal(isWorkflowRunning(), false);
 		const normal = await beforeAgentStart({ systemPrompt: "base" });

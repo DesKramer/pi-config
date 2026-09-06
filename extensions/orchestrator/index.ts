@@ -7,7 +7,7 @@
  * Subagent Registry table generated from pi-subagents' live bridge so
  * session-disabled and dynamically registered profiles are reflected each turn.
  *
- * On by default. Use /orchestrator to toggle the layer for the session.
+ * Off by default. Use /orchestrator to toggle the layer for the session.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -186,10 +186,10 @@ export function buildLayer(): string {
 // ── Extension ─────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-	let enabled = true;
+	let enabled = false;
 
 	pi.registerCommand("orchestrator", {
-		description: "Toggle Orchestration Mode system-prompt layer (on by default)",
+		description: "Toggle Orchestration Mode system-prompt layer (off by default)",
 		handler: async (_args, ctx) => {
 			enabled = !enabled;
 			ctx.ui.notify(

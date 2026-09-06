@@ -4,15 +4,11 @@ A [pi](https://github.com/earendil-works/pi) extension that registers a single `
 
 | Agent | Tools | Model | Purpose |
 |-------|-------|-------|---------|
-| **scout** | read, grep, find, ls, mem0_memory | openai-codex/gpt-5.6-sol (max) | Fast codebase recon with explicit local-memory search/add |
-| **orchestrator** | subagent | openai-codex/gpt-5.6-sol (max) | Coordinates autonomous improvement campaigns |
-| **researcher** | read, grep, find, ls, subagent | openai-codex/gpt-5.6-sol (max) | Investigates opportunities and proposes experiments |
-| **experimenter** | read, write, edit, safe_bash, subagent | openai-codex/gpt-5.6-sol (max) | Implements and measures bounded experiments |
-| **evaluator** | read, grep, find, ls, safe_bash, web_search, fetch_content, subagent | openai-codex/gpt-5.6-sol (max) | Independently evaluates candidates |
-| **web-researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | openai-codex/gpt-5.6-sol (max) | Web research |
-| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory | openai-codex/gpt-5.6-sol (max) | Code changes with explicit local-memory search/add (can dispatch scout/web-researcher to protect its own context) |
-| **acceptance-criteria** | read, grep, find | openai-codex/gpt-5.6-sol (max) | Derives testable acceptance criteria and identifies ambiguities |
-| **qa** | read, grep, find, safe_bash | openai-codex/gpt-5.6-sol (max) | QA gate for a completed, integrated cycle of worker changes |
+| **scout** | read, grep, find, ls, mem0_memory | openai-codex/gpt-6-astra, medium reasoning | Fast codebase recon with explicit local-memory search/add |
+| **orchestrator** | subagent | openai-codex/gpt-6-astra, medium reasoning | Coordinates autonomous improvement campaigns |
+| **web-researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | openai-codex/gpt-6-astra, medium reasoning | Web research |
+| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory | openai-codex/gpt-6-astra, medium reasoning | Code changes with explicit local-memory search/add, can dispatch scout/web-researcher |
+| **qa** | read, grep, find, safe_bash | openai-codex/gpt-6-astra, medium reasoning | QA gate for a completed, integrated cycle of worker changes |
 
 Agent recursion is constrained with `subagent_agents` allowlists. The orchestrator can dispatch researcher, experimenter, and evaluator; nested agents can only dispatch their compatible focused helpers.
 
@@ -116,7 +112,7 @@ Frontmatter fields:
 - **name** (required) — unique agent name, used in `{ agent: "my-agent" }` calls
 - **description** — short description
 - **tools** — comma-separated list of tools the agent needs (builtin or extension). Include `subagent` here to let this agent spawn other agents.
-- **model** — model identifier (defaults to `cosine/glm-5.2`)
+- **model** — model identifier, defaults to `openai-codex/gpt-6-astra`
 - **thinking** — reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (defaults to `medium`; model support may narrow this list)
 - **subagent_agents** — if `subagent` is in `tools`, restrict which agents this one may spawn. Comma-separated list of agent names. Omit for no profile restriction. Enforced by passing `PI_SUBAGENT_ALLOWED` to the child process. At spawn time this allowlist is intersected with the parent session's enabled profiles; an unrestricted parent likewise passes only enabled profiles when any are disabled. Thus session availability never broadens a profile allowlist, and nested agents cannot see disabled profiles.
 
@@ -179,7 +175,7 @@ function registerMyAgents(): void {
         name: frontmatter.name,
         description: frontmatter.description || "",
         tools,
-        model: frontmatter.model || "cosine/glm-5.2",
+        model: frontmatter.model || "openai-codex/gpt-6-astra",
         thinking: frontmatter.thinking || "medium",
         systemPrompt: body,
         filePath,

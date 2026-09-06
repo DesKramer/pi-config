@@ -8,7 +8,7 @@ actual work to subagents via the `subagent` tool (see
 
 ## Behavior
 
-- **On by default.** Every normal turn gets the layer appended to the system prompt.
+- **Off by default.** Use `/orchestrator` to enable the layer for the current session. New sessions and `/reload` start with it off.
 - **Workflow-aware.** A running `pi-workflow` owns the prompt, so the generic layer is suppressed until the workflow pauses or ends.
 - **`/orchestrator`** toggles the layer on/off for the current session and
   shows a confirmation notification.

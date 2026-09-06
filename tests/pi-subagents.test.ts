@@ -110,6 +110,17 @@ test("model refs resolve canonical first and unique bare IDs second", () => {
 	assert.equal(resolveModelRef("openrouter/anthropic/claude-sonnet-4-6", models), bareWithSlash);
 });
 
+test("bundled profiles and model-less agents default to Codex GPT-6 Astra", () => {
+	extension({ registerCommand: () => {}, registerTool: () => {} } as any);
+	const agents = listAgents();
+	assert.ok(agents.length > 0, "expected bundled subagent profiles");
+	for (const agent of [...agents, { name: "model-less-agent" }]) {
+		const settings = resolveEffectiveAgentSettings(agent, []);
+		assert.equal(settings.model, "openai-codex/gpt-6-astra", agent.name);
+		assert.equal(settings.thinking, "medium", agent.name);
+	}
+});
+
 test("effective settings are isolated per agent and clear on request", () => {
 	clearAllAgentOverrides();
 	const reasoningModel = testModel("anthropic", "claude", { reasoning: true });

@@ -65,8 +65,8 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `fuzzy-file-autocomplete.ts` | Extends `@` file completion with one-edit typo tolerance using a bounded, ignore-aware `fd` index. |
 | `git-status-widget.ts` | Git status widget/status display. |
 | `mem0.ts` | Optional self-hosted Mem0 OSS memory integration with bounded project recall, explicit capture/search tools, and status diagnostics. |
-| `orchestrator/` | Live-registry orchestration prompt layer that yields to active workflows. |
-| `pi-subagents/` | Subagent tooling with nine bundled profiles (`acceptance-criteria`, `evaluator`, `experimenter`, `orchestrator`, `qa`, `researcher`, `scout`, `web-researcher`, and `worker`) plus `safe-bash`. |
+| `orchestrator/` | Opt-in orchestration prompt layer with a live registry. Off by default; toggle with `/orchestrator`. |
+| `pi-subagents/` | Subagent tooling with five bundled profiles (`orchestrator`, `qa`, `scout`, `web-researcher`, and `worker`), defaulting to `openai-codex/gpt-6-astra`, plus `safe-bash`. |
 | `pi-workflow/` | YAML workflow runner with `/workflow` commands, checkpoint tool, and pinned branch-correct state. |
 | `pretty-markdown-code.ts` | Improved markdown/code rendering. |
 | `provider-model-picker.ts` | Provider/model picker helper. |
