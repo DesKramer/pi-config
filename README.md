@@ -104,11 +104,14 @@ Defined in `config/models.json` and registered by `extensions/custom-providers.t
 
 - `azure-foundry-tech`
 - `cosine`
+- `ollama`
 
-API keys are stored as environment references, not committed raw secrets:
+Remote provider API keys are stored as environment references, not committed raw secrets:
 
 - `AZURE_FOUNDRY_TECH_API_KEY`
 - `COSINE_API_KEY`
+
+The `ollama` provider uses the local API at `http://localhost:11434/v1` with the required dummy key `ollama`. Its configured local models are `ornith-1.5:9b` and `granite4.2:3b`.
 
 ### Settings
 
