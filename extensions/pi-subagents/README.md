@@ -4,17 +4,17 @@ A [pi](https://github.com/earendil-works/pi) extension that registers a single `
 
 | Agent | Tools | Model | Purpose |
 |-------|-------|-------|---------|
-| **scout** | read, grep, find, ls, mem0_memory | openai-codex/gpt-6-astra, medium reasoning | Fast codebase recon with explicit local-memory search/add |
+| **scout** | read, grep, find, ls | openai-codex/gpt-6-astra, medium reasoning | Fast codebase recon |
 | **orchestrator** | subagent | openai-codex/gpt-6-astra, medium reasoning | Coordinates autonomous improvement campaigns |
 | **web-researcher** | web_search, fetch_content, firecrawl_search, firecrawl_scrape | openai-codex/gpt-6-astra, medium reasoning | Web research |
-| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent, mem0_memory | openai-codex/gpt-6-astra, medium reasoning | Code changes with explicit local-memory search/add, can dispatch scout/web-researcher |
+| **worker** | read, write, edit, safe_bash, web_search, fetch_content, subagent | openai-codex/gpt-6-astra, medium reasoning | Code changes, can dispatch scout/web-researcher |
 | **qa** | read, grep, find, safe_bash | openai-codex/gpt-6-astra, medium reasoning | QA gate for a completed, integrated cycle of worker changes |
 
 Agent recursion is constrained with `subagent_agents` allowlists. The orchestrator can dispatch researcher, experimenter, and evaluator; nested agents can only dispatch their compatible focused helpers.
 
 ## Dependencies
 
-`safe_bash` ships in this repo (`tools/safe-bash.ts`). This local install maps `web_search` and `fetch_content` to the installed `pi-web-access` package under `~/.pi/agent/npm/node_modules/pi-web-access/index.ts`, `firecrawl_search`/`firecrawl_scrape` to `firecrawl-tools.ts`, and `mem0_memory` to `mem0.ts`. The Mem0 tool is available only to worker and scout; it still searches/adds only on explicit user requests.
+`safe_bash` ships in this repo (`tools/safe-bash.ts`). This local install maps `web_search` and `fetch_content` to the installed `pi-web-access` package under `~/.pi/agent/npm/node_modules/pi-web-access/index.ts`, and `firecrawl_search`/`firecrawl_scrape` to `firecrawl-tools.ts`.
 
 ## Usage
 
