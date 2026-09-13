@@ -50,7 +50,6 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `ask-user-tool.ts` | Adds an interactive ask-user style tool/UI flow. |
 | `copy-agent-last.ts` | Helper for copying the latest assistant output. |
 | `custom-providers.ts` | Registers custom providers from `config/models.json`. |
-| `ephemeral.ts` | Ephemeral/session helper extension. |
 | `firecrawl-tools.ts` | Firecrawl search/scrape tools. |
 | `fuzzy-file-autocomplete.ts` | Extends `@` file completion with one-edit typo tolerance using a bounded, ignore-aware `fd` index. |
 | `git-status-widget.ts` | Git status widget/status display. |
