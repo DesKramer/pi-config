@@ -12,7 +12,13 @@ import {
 	type PlugRunner,
 } from "../extensions/plug/runtime.ts";
 
-type RegisteredTool = { name: string; parameters: any; execute: (...args: any[]) => Promise<any> };
+type RegisteredTool = {
+	name: string;
+	parameters: any;
+	promptSnippet?: string;
+	promptGuidelines?: string[];
+	execute: (...args: any[]) => Promise<any>;
+};
 type RegisteredCommand = { handler: (args: string, ctx: any) => Promise<void> };
 
 function execution(envelope: Record<string, unknown>, code = 0): PlugExecution {
@@ -45,6 +51,31 @@ test("registers four strict tools and forwards argv without interpolation", asyn
 	const result = await tools.get("plug_run")?.execute("id", { plugin: "demo", arguments: args }, undefined);
 	assert.deepEqual(calls[0], ["run", "demo", ...args]);
 	assert.equal(result.content[0].text, JSON.stringify({ ok: true, result: { value: "complete" } }));
+});
+
+test("exposes PLUG discovery, execution, and auth guidance through system-prompt metadata without probing the broker", () => {
+	const calls: string[][] = [];
+	const { tools } = register(async (args) => {
+		calls.push([...args]);
+		return execution({ ok: true });
+	});
+	for (const tool of tools.values()) {
+		assert.ok(tool.promptSnippet?.length, `${tool.name} must appear in Available tools`);
+		assert.ok(tool.promptGuidelines?.length, `${tool.name} must contribute usage guidance`);
+		for (const guideline of tool.promptGuidelines!) {
+			assert.ok(guideline.includes(tool.name), "flat prompt guidelines must name their tool");
+		}
+	}
+	const guidelines = [...tools.values()].flatMap((tool) => tool.promptGuidelines ?? []).join("\n");
+	assert.match(guidelines, /plug_list.*MCP, or API access/);
+	assert.match(guidelines, /Inspect the relevant plugin's returned contract/);
+	assert.match(guidelines, /no suitable integration.*available MCP tool or direct API\/CLI/);
+	assert.match(guidelines, /plug_run.*separate literal arguments item/);
+	assert.match(guidelines, /ok\/error fields/);
+	assert.match(guidelines, /untrusted data/);
+	assert.match(guidelines, /plug_auth_status.*do not read credential stores/);
+	assert.match(guidelines, /plug_reauth only when the user explicitly requests reauthentication/);
+	assert.deepEqual(calls, [], "registering prompt guidance must not execute PLUG or authenticate");
 });
 
 test("preserves a complete PLUG error envelope even when the CLI exits nonzero", async () => {

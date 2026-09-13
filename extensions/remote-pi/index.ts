@@ -19,6 +19,7 @@ import {
 	type BridgeCommandPayload,
 	type BridgeEnvelope,
 	type CapabilityMap,
+	type CompactTextDeltaNegotiation,
 	type ErrorObject,
 	type EventName,
 	type ModelSummary,
@@ -218,6 +219,7 @@ export class RemotePiBridgeClient {
 	private reconnectTimer: Timer | undefined;
 	private reconnectAttempt = 0;
 	private registered = false;
+	private compactTextDeltas = false;
 	private shutdownRequested = false;
 	private status: BridgeStatus = "idle";
 	private runtime: RuntimeContext | undefined;
@@ -225,7 +227,7 @@ export class RemotePiBridgeClient {
 	private state: SessionState = "connected";
 	private lastSnapshotSequence = 0;
 	private currentRunId: string | undefined;
-	private readonly messageIds = new WeakMap<object, string>();
+	private readonly activeMessages = new Map<string, { messageId: string; runId?: string }>();
 	private readonly pendingCommands = new Map<string, PendingCommand>();
 
 	constructor(options: RemotePiBridgeOptions = {}) {
@@ -244,6 +246,8 @@ export class RemotePiBridgeClient {
 	}
 
 	start(pi: ExtensionAPI, ctx: ExtensionContext): void {
+		this.activeMessages.clear();
+		this.currentRunId = undefined;
 		const now = this.nowIso();
 		this.runtime = { pi, ctx, createdAt: this.runtime?.createdAt ?? now, connectedAt: this.runtime?.connectedAt, lastActivityAt: now };
 		this.state = stateFromContext(ctx, this.state === "disconnected" ? "connected" : this.state);
@@ -261,6 +265,7 @@ export class RemotePiBridgeClient {
 	shutdown(reason: SessionShutdownEvent["reason"] = "quit"): void {
 		if (this.shutdownRequested) return;
 		this.shutdownRequested = true;
+		this.activeMessages.clear();
 		this.clearHeartbeat();
 		this.clearReconnect();
 		const previous = this.state;
@@ -297,17 +302,20 @@ export class RemotePiBridgeClient {
 
 	onAgentStart(ctx: ExtensionContext): void {
 		this.updateContext(ctx);
+		this.activeMessages.clear();
 		this.currentRunId = randomUUID();
 		this.setState("running", "agent_start", { runId: this.currentRunId });
 	}
 
 	onAgentEnd(_event: AgentEndEvent, ctx: ExtensionContext): void {
 		this.updateContext(ctx);
+		this.activeMessages.clear();
 		this.setState("settling", "agent_end", { runId: this.currentRunId });
 	}
 
 	onAgentSettled(ctx: ExtensionContext): void {
 		this.updateContext(ctx);
+		this.activeMessages.clear();
 		const runId = this.currentRunId;
 		this.sendBridgeEvent("agent.settled", { runId, result: "settled", entryCursor: entryCursorFromContext(ctx), queue: emptyQueueSnapshot(ctx) }, { runId });
 		this.setState("idle", "agent_settled", { runId });
@@ -315,8 +323,12 @@ export class RemotePiBridgeClient {
 	}
 
 	onMessageStart(event: { message: unknown }, ctx: ExtensionContext): void {
+		if (this.shutdownRequested) return;
 		this.updateContext(ctx);
-		const messageId = this.getMessageId(event.message);
+		const key = this.messageLifecycleKey(event.message);
+		if (this.activeMessages.has(key)) return;
+		const messageId = randomUUID();
+		this.activeMessages.set(key, { messageId, runId: this.currentRunId });
 		this.sendBridgeEvent("message.started", {
 			messageId,
 			role: messageRole(event.message),
@@ -327,31 +339,40 @@ export class RemotePiBridgeClient {
 	}
 
 	onMessageUpdate(event: { message: unknown; assistantMessageEvent: Record<string, unknown> }, ctx: ExtensionContext): void {
+		if (this.shutdownRequested || messageRole(event.message) !== "assistant") return;
+		const lifecycle = this.activeMessages.get(this.messageLifecycleKey(event.message));
+		if (!lifecycle) return;
 		this.updateContext(ctx);
 		const delta = event.assistantMessageEvent as Record<string, unknown>;
 		const payload: Record<string, unknown> = {
-			messageId: this.getMessageId(event.message),
-			runId: this.currentRunId,
+			messageId: lifecycle.messageId,
+			runId: lifecycle.runId,
 			deltaType: delta.type,
 		};
 		for (const key of ["contentIndex", "delta", "partial", "toolCall", "reason"] as const) {
+			if (key === "partial" && this.compactTextDeltas && delta.type === "text_delta" && typeof delta.delta === "string") continue;
 			if (key in delta) payload[key] = delta[key];
 		}
-		this.sendBridgeEvent("message.delta", payload, { runId: this.currentRunId });
+		this.sendBridgeEvent("message.delta", payload, { runId: lifecycle.runId });
 	}
 
 	onMessageEnd(event: { message: unknown }, ctx: ExtensionContext): void {
+		if (this.shutdownRequested) return;
+		const key = this.messageLifecycleKey(event.message);
+		const lifecycle = this.activeMessages.get(key);
+		if (!lifecycle) return;
+		this.activeMessages.delete(key);
 		this.updateContext(ctx);
 		const message = event.message as Record<string, unknown>;
 		this.sendBridgeEvent("message.completed", {
-			messageId: this.getMessageId(event.message),
+			messageId: lifecycle.messageId,
 			role: messageRole(event.message),
-			runId: this.currentRunId,
+			runId: lifecycle.runId,
 			message: event.message,
 			entryCursor: entryCursorFromContext(ctx),
 			finishReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
 			isError: message.stopReason === "error" || message.stopReason === "aborted",
-		}, { runId: this.currentRunId });
+		}, { runId: lifecycle.runId });
 	}
 
 	onToolStart(event: { toolCallId: string; toolName: string; args: unknown }, ctx: ExtensionContext): void {
@@ -417,6 +438,7 @@ export class RemotePiBridgeClient {
 		if (this.shutdownRequested) return;
 		this.clearReconnect();
 		this.registered = false;
+		this.compactTextDeltas = false;
 		this.parser = new StrictLfJsonlParser();
 		this.updateStatus(this.runtime?.ctx, "connecting");
 		let socket: SocketLike;
@@ -499,8 +521,9 @@ export class RemotePiBridgeClient {
 		}
 	}
 
-	private handleRegistered(envelope: BridgeEnvelope<{ sessionId: string; heartbeatIntervalMs?: number; commandTimeoutMs?: number }>): void {
+	private handleRegistered(envelope: BridgeEnvelope<{ sessionId: string; heartbeatIntervalMs?: number; commandTimeoutMs?: number } & CompactTextDeltaNegotiation>): void {
 		this.registered = true;
+		this.compactTextDeltas = envelope.payload.compactTextDeltas === true;
 		this.remoteSessionId = envelope.payload.sessionId;
 		if (typeof envelope.payload.heartbeatIntervalMs === "number" && envelope.payload.heartbeatIntervalMs > 0) this.heartbeatIntervalMs = envelope.payload.heartbeatIntervalMs;
 		if (typeof envelope.payload.commandTimeoutMs === "number" && envelope.payload.commandTimeoutMs > 0) this.commandTimeoutMs = envelope.payload.commandTimeoutMs;
@@ -602,6 +625,7 @@ export class RemotePiBridgeClient {
 			state: stateFromContext(ctx, this.state),
 			entryCursor: entryCursorFromContext(ctx),
 			capabilities: pickAttachedCapabilities(createAttachedCapabilityMap(true)),
+			compactTextDeltas: true,
 		};
 		this.writeEnvelope("bridge.register", payload);
 	}
@@ -612,7 +636,10 @@ export class RemotePiBridgeClient {
 			if (this.shutdownRequested || !this.socket || !this.registered) return;
 			const ctx = this.runtime?.ctx;
 			this.writeEnvelope("bridge.heartbeat", {
-				state: stateFromContext(ctx, this.state),
+				// A heartbeat must not collapse agent_end=settling into running
+				// or idle before the next explicit lifecycle hook.
+				state: this.state === "settling" || this.state === "retrying" || this.state === "compacting"
+					? this.state : stateFromContext(ctx, this.state),
 				lastActivityAt: this.runtime?.lastActivityAt ?? this.nowIso(),
 				entryCursor: ctx ? entryCursorFromContext(ctx) : null,
 			});
@@ -723,15 +750,19 @@ export class RemotePiBridgeClient {
 		return bridgeSnapshot;
 	}
 
-	private getMessageId(message: unknown): string {
-		if (message && typeof message === "object") {
-			const existing = this.messageIds.get(message);
-			if (existing) return existing;
-			const id = randomUUID();
-			this.messageIds.set(message, id);
-			return id;
-		}
-		return randomUUID();
+	private messageLifecycleKey(message: unknown): string {
+		// Pi emits ordered start/update/end lifecycles, but clones assistant
+		// objects at each update. Only one assistant message streams at a time.
+		// Tool executions can interleave; their final message pairs are ordered.
+		// A start owns the generated wire ID until end, independent of content,
+		// timestamps, and the session leaf (which is persisted after the hook).
+		// Repeated active starts and unmatched updates/ends are ignored. After
+		// end, every start is a new message, even for identical content. Pi has
+		// no ID to disambiguate old same-role events reordered across new starts.
+		// Socket reconnects preserve these lifecycles; run/session boundaries do not.
+		const role = messageRole(message);
+		const toolCallId = role === "toolResult" ? (message as { toolCallId?: unknown }).toolCallId : undefined;
+		return JSON.stringify([role, typeof toolCallId === "string" ? toolCallId : null]);
 	}
 
 	private finishPending(commandId: string): void {

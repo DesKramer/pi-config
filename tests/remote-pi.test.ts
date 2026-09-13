@@ -95,7 +95,7 @@ function records(socket: FakeSocket): any[] {
 		.map((line) => JSON.parse(line));
 }
 
-function sendRegistered(socket: FakeSocket, sessionId = "remote-session-1", heartbeatIntervalMs = 5000, commandTimeoutMs = 30000) {
+function sendRegistered(socket: FakeSocket, sessionId = "remote-session-1", heartbeatIntervalMs = 5000, commandTimeoutMs = 30000, compactTextDeltas?: unknown) {
 	socket.emit(
 		"data",
 		encodeJsonlRecord({
@@ -105,7 +105,7 @@ function sendRegistered(socket: FakeSocket, sessionId = "remote-session-1", hear
 			sessionId,
 			bridgeSequence: 1,
 			timestamp: new Date().toISOString(),
-			payload: { sessionId, heartbeatIntervalMs, commandTimeoutMs, acceptedProtocolVersion: REMOTE_PI_PROTOCOL_VERSION },
+			payload: { sessionId, heartbeatIntervalMs, commandTimeoutMs, acceptedProtocolVersion: REMOTE_PI_PROTOCOL_VERSION, ...(compactTextDeltas !== undefined ? { compactTextDeltas } : {}) },
 		}),
 	);
 }
@@ -260,12 +260,12 @@ test("available Pi lifecycle hooks are normalized as bridge events with synthesi
 
 	bridge.onAgentStart(ctx as any);
 	const assistant = { role: "assistant", content: [{ type: "text", text: "Hi" }], stopReason: "stop", timestamp: Date.now() };
-	bridge.onMessageStart({ type: "message_start", message: assistant } as any, ctx as any);
-	bridge.onMessageUpdate({ type: "message_update", message: assistant, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hi", partial: assistant } } as any, ctx as any);
+	bridge.onMessageStart({ type: "message_start", message: structuredClone(assistant) } as any, ctx as any);
+	bridge.onMessageUpdate({ type: "message_update", message: structuredClone(assistant), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hi", partial: structuredClone(assistant) } } as any, ctx as any);
 	bridge.onToolStart({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "bash", args: { command: "pwd" } } as any, ctx as any);
 	bridge.onToolUpdate({ type: "tool_execution_update", toolCallId: "tool-1", toolName: "bash", args: {}, partialResult: { content: [{ type: "text", text: "/tmp" }] } } as any, ctx as any);
 	bridge.onToolEnd({ type: "tool_execution_end", toolCallId: "tool-1", toolName: "bash", result: { content: [{ type: "text", text: "/tmp" }] }, isError: false } as any, ctx as any);
-	bridge.onMessageEnd({ type: "message_end", message: assistant } as any, ctx as any);
+	bridge.onMessageEnd({ type: "message_end", message: structuredClone(assistant) } as any, ctx as any);
 	bridge.onAgentEnd({ type: "agent_end", messages: [assistant] } as any, ctx as any);
 	bridge.onAgentSettled({ ...ctx, isIdle: () => true } as any);
 	bridge.onModelSelect({ type: "model_select", model: ctx.model, previousModel: undefined, source: "set" } as any, ctx as any);
@@ -334,6 +334,270 @@ test("bridge reconnect uses bounded jittered backoff and re-registers without re
 	await wait(30);
 	assert.equal(sockets.length >= 2, true);
 	assert.equal(records(sockets[1]).filter((record) => record.type === "bridge.register").length, 1);
+});
+
+test("compact text negotiation preserves multiblock deltas, fallback partials, and completions", async () => {
+	const sockets: FakeSocket[] = [];
+	const { pi } = fakePi();
+	const { ctx } = fakeCtx();
+	const bridge = new RemotePiBridgeClient({ connectFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, reconnectBaseDelayMs: 1, reconnectJitterRatio: 0 });
+	bridge.start(pi as any, ctx as any);
+	const socket = sockets[0]!;
+	socket.emit("connect");
+	assert.equal(records(socket)[0].payload.compactTextDeltas, true);
+	const message = { role: "assistant", content: [{ type: "text", text: "First\n" }, { type: "text", text: "\nSecond" }] };
+	const update = (delta: Record<string, unknown>) => bridge.onMessageUpdate({ message: structuredClone(message), assistantMessageEvent: { ...delta, partial: structuredClone(message) } }, ctx as any);
+	try {
+		for (const acknowledgement of [undefined, false, "true"]) {
+			sendRegistered(socket, "remote-session-1", 5000, 30000, acknowledgement);
+			bridge.onMessageStart({ message: structuredClone(message) }, ctx as any);
+			update({ type: "text_delta", delta: "old peer" });
+			assert.deepEqual(records(socket).at(-1).payload.event.payload.partial, message);
+			bridge.onMessageEnd({ message: structuredClone(message) }, ctx as any);
+		}
+		sendRegistered(socket, "remote-session-1", 5000, 30000, true);
+		bridge.onMessageStart({ message }, ctx as any);
+		const start = records(socket).at(-1).payload.event.payload;
+		const text: string[] = [];
+		for (const [contentIndex, delta] of [[0, "First\n"], [1, "\nSecond"], [1, ""]] as const) {
+			update({ type: "text_delta", contentIndex, delta });
+			const payload = records(socket).at(-1).payload.event.payload;
+			assert.equal("partial" in payload, false);
+			assert.equal(payload.contentIndex, contentIndex);
+			assert.equal(payload.messageId, start.messageId);
+			text.push(payload.delta);
+		}
+		assert.equal(text.join(""), "First\n\nSecond");
+		for (const delta of [{ type: "text_delta" }, { type: "text_delta", delta: 1 }, { type: "thinking_delta", delta: "hmm" }, { type: "toolcall_delta", delta: "{" }, { type: "unknown", delta: "x" }]) {
+			update(delta);
+			assert.deepEqual(records(socket).at(-1).payload.event.payload.partial, message);
+		}
+		bridge.onMessageEnd({ message }, ctx as any);
+		assert.deepEqual(records(socket).at(-1).payload.event.payload.message, message);
+		socket.destroy();
+		await wait(10);
+		assert.equal(sockets.length, 2);
+		bridge.onMessageStart({ message: structuredClone(message) }, ctx as any);
+		update({ type: "text_delta", delta: "before re-registration" });
+		assert.deepEqual(records(sockets[1]!).at(-1).payload.event.payload.partial, message);
+	} finally { bridge.shutdown(); }
+});
+
+test("cloned message lifecycles keep one row per message across thinking, text blocks, and identical answers", () => {
+	for (const compact of [false, true]) {
+		const socket = new FakeSocket();
+		const { pi } = fakePi();
+		const { ctx } = fakeCtx();
+		const bridge = new RemotePiBridgeClient({ connectFactory: () => socket });
+		bridge.start(pi as any, ctx as any);
+		socket.emit("connect");
+		sendRegistered(socket, "remote-session-1", 5000, 30000, compact);
+		const start = (message: unknown) => bridge.onMessageStart({ message: structuredClone(message) }, ctx as any);
+		const end = (message: unknown) => bridge.onMessageEnd({ message: structuredClone(message) }, ctx as any);
+		const assistant = {
+			role: "assistant", content: [] as any[], timestamp: 123,
+			api: "openai-responses", provider: "openai", model: "gpt-5", stopReason: "pending",
+			usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		};
+		const update = (message: unknown, delta: Record<string, unknown>) => bridge.onMessageUpdate({
+			message: structuredClone(message), assistantMessageEvent: { ...delta, partial: structuredClone(message) },
+		}, ctx as any);
+		try {
+			bridge.onAgentStart(ctx as any);
+			const user = { role: "user", content: "Repeat the answer", timestamp: 123 };
+			start(user);
+			end(user);
+			const custom = { role: "custom", customType: "context", content: "Repeat the answer", display: true, timestamp: 123 };
+			start(custom);
+			end(custom);
+			// Repeated content and timestamps are deliberately identical. Starts,
+			// not text, timestamps, object references, or run IDs, separate messages.
+			for (let i = 0; i < 2; i++) {
+				const message = structuredClone(assistant);
+				start(message);
+				message.content.push({ type: "thinking", thinking: "" });
+				update(message, { type: "thinking_start", contentIndex: 0 });
+				message.content[0].thinking = "Consider this";
+				update(message, { type: "thinking_delta", contentIndex: 0, delta: "Consider this" });
+				update(message, { type: "thinking_end", contentIndex: 0 });
+				for (const [contentIndex, chunks] of [[1, ["First", " block\n"]], [2, ["Second", " block", ""]]] as const) {
+					message.content.push({ type: "text", text: "" });
+					update(message, { type: "text_start", contentIndex });
+					for (const delta of chunks) {
+						message.content[contentIndex].text += delta;
+						update(message, { type: "text_delta", contentIndex, delta });
+					}
+					update(message, { type: "text_end", contentIndex });
+				}
+				message.stopReason = "stop";
+				message.usage.output = 8;
+				message.usage.totalTokens = 18;
+				end(message);
+			}
+			const events = records(socket).flatMap((r) => r.type === "bridge.event" && r.payload.event.type.startsWith("message.") ? [r.payload.event] : []);
+			const starts = events.filter((e) => e.type === "message.started");
+			assert.deepEqual(starts.map((e) => e.payload.role), ["user", "custom", "assistant", "assistant"]);
+			assert.equal(new Set(starts.map((e) => e.payload.messageId)).size, 4);
+			assert.equal(new Set(starts.map((e) => e.payload.runId)).size, 1);
+			// Model a consumer keyed by the authoritative start ID. Completions
+			// replace partial content rather than adding a second answer row.
+			const rows = new Map<string, any>();
+			for (const event of events) {
+				const payload = event.payload;
+				if (event.type === "message.started") rows.set(payload.messageId, { role: payload.role, blocks: [] });
+				const row = rows.get(payload.messageId);
+				assert.ok(row, "every delta and completion must have a preceding start");
+				assert.equal(payload.runId, starts[0].payload.runId);
+				assert.equal(event.causation.runId, payload.runId);
+				if (event.type === "message.delta") {
+					if (payload.deltaType === "text_delta") {
+						assert.equal("partial" in payload, !compact);
+						row.blocks[payload.contentIndex] = (row.blocks[payload.contentIndex] ?? "") + payload.delta;
+					} else assert.equal(payload.partial.role, "assistant");
+				} else if (event.type === "message.completed") {
+					row.message = payload.message;
+					if (row.role === "assistant") {
+						assert.equal(row.blocks[1], "First block\n");
+						assert.equal(row.blocks[2], "Second block");
+						assert.deepEqual(payload.message.content, [{ type: "thinking", thinking: "Consider this" }, { type: "text", text: "First block\n" }, { type: "text", text: "Second block" }]);
+						assert.equal(payload.message.usage.output, 8);
+					}
+				}
+			}
+			assert.equal(rows.size, 4);
+			assert.ok([...rows.values()].every((row) => row.message));
+			assert.equal(events.filter((e) => e.type === "message.completed").length, 4);
+		} finally { bridge.shutdown(); }
+	}
+});
+
+test("parallel tool execution does not steal message identities from ordered tool results or the next assistant", () => {
+	const socket = new FakeSocket();
+	const { pi } = fakePi();
+	const { ctx } = fakeCtx();
+	const bridge = new RemotePiBridgeClient({ connectFactory: () => socket });
+	bridge.start(pi as any, ctx as any);
+	socket.emit("connect");
+	sendRegistered(socket);
+	const pair = (message: unknown) => {
+		bridge.onMessageStart({ message: structuredClone(message) }, ctx as any);
+		bridge.onMessageEnd({ message: structuredClone(message) }, ctx as any);
+	};
+	try {
+		bridge.onAgentStart(ctx as any);
+		const calls = ["call-1", "call-2"].map((id) => ({ type: "toolCall", id, name: "bash", arguments: { command: "pwd" } }));
+		pair({ role: "assistant", content: calls, stopReason: "toolUse" });
+		for (const call of calls) bridge.onToolStart({ toolCallId: call.id, toolName: call.name, args: call.arguments }, ctx as any);
+		const result = { content: [{ type: "text", text: "/tmp" }] };
+		for (const call of [...calls].reverse()) {
+			bridge.onToolUpdate({ toolCallId: call.id, toolName: call.name, partialResult: result }, ctx as any);
+			bridge.onToolEnd({ toolCallId: call.id, toolName: call.name, result, isError: false }, ctx as any);
+		}
+		for (const call of calls) pair({ role: "toolResult", toolCallId: call.id, toolName: call.name, ...result, isError: false, timestamp: 123 });
+		pair({ role: "assistant", content: result.content, stopReason: "stop" });
+		const events = records(socket).filter((r) => r.type === "bridge.event").map((r) => r.payload.event);
+		const starts = events.filter((e) => e.type === "message.started");
+		const ends = events.filter((e) => e.type === "message.completed");
+		assert.deepEqual(starts.map((e) => e.payload.role), ["assistant", "toolResult", "toolResult", "assistant"]);
+		assert.equal(new Set(starts.map((e) => e.payload.messageId)).size, 4);
+		assert.deepEqual(ends.map((e) => e.payload.messageId), starts.map((e) => e.payload.messageId));
+		assert.deepEqual(ends.filter((e) => e.payload.role === "toolResult").map((e) => e.payload.message.toolCallId), ["call-1", "call-2"]);
+		assert.deepEqual(events.filter((e) => e.type === "tool.completed").map((e) => e.payload.toolCallId), ["call-2", "call-1"]);
+	} finally { bridge.shutdown(); }
+});
+
+test("message lifecycle guards ignore unmatched and repeated events and reset at run and session boundaries", () => {
+	const socket = new FakeSocket();
+	const { pi } = fakePi();
+	const { ctx } = fakeCtx();
+	const bridge = new RemotePiBridgeClient({ connectFactory: () => socket });
+	bridge.start(pi as any, ctx as any);
+	socket.emit("connect");
+	sendRegistered(socket);
+	const message = { role: "assistant", content: [{ type: "text", text: "same" }], stopReason: "aborted" };
+	const start = () => bridge.onMessageStart({ message: structuredClone(message) }, ctx as any);
+	const end = () => bridge.onMessageEnd({ message: structuredClone(message) }, ctx as any);
+	const update = () => bridge.onMessageUpdate({ message: structuredClone(message), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "same" } }, ctx as any);
+	const messages = () => records(socket).flatMap((r) => r.type === "bridge.event" && r.payload.event.type.startsWith("message.") ? [r.payload.event] : []);
+	try {
+		update(); end();
+		assert.equal(messages().length, 0);
+		bridge.onAgentStart(ctx as any);
+		start(); start(); update(); end(); end(); update();
+		assert.deepEqual(messages().map((e) => e.type), ["message.started", "message.delta", "message.completed"]);
+		assert.equal(messages()[2].payload.isError, true);
+		for (const boundary of [
+			() => bridge.onAgentEnd({ messages: [] } as any, ctx as any),
+			() => bridge.onAgentStart(ctx as any),
+			() => bridge.onAgentSettled(ctx as any),
+			() => bridge.start(pi as any, ctx as any),
+		]) {
+			start();
+			boundary();
+			const count = messages().length;
+			update(); end();
+			assert.equal(messages().length, count);
+			start(); end();
+		}
+		const starts = messages().filter((e) => e.type === "message.started");
+		assert.equal(new Set(starts.map((e) => e.payload.messageId)).size, starts.length);
+		start();
+		bridge.shutdown("reload");
+		const count = messages().length;
+		start(); update(); end();
+		assert.equal(messages().length, count);
+	} finally { bridge.shutdown(); }
+});
+
+test("an active cloned message keeps its start ID and run across reconnect and re-registration", async () => {
+	const sockets: FakeSocket[] = [];
+	const { pi } = fakePi();
+	const { ctx } = fakeCtx();
+	const bridge = new RemotePiBridgeClient({ connectFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, reconnectBaseDelayMs: 1, reconnectJitterRatio: 0 });
+	bridge.start(pi as any, ctx as any);
+	const socket = sockets[0]!;
+	socket.emit("connect");
+	sendRegistered(socket, "remote-session-1", 5000, 30000, true);
+	try {
+		bridge.onAgentStart(ctx as any);
+		const message = { role: "assistant", content: [{ type: "text", text: "Hello" }] };
+		bridge.onMessageStart({ message: structuredClone(message) }, ctx as any);
+		const started = records(socket).at(-1).payload.event.payload;
+		socket.destroy();
+		await wait(10);
+		const reconnected = sockets[1]!;
+		reconnected.emit("connect");
+		sendRegistered(reconnected);
+		bridge.onMessageUpdate({ message: structuredClone(message), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hello", partial: structuredClone(message) } }, ctx as any);
+		const delta = records(reconnected).at(-1).payload.event.payload;
+		assert.equal(delta.messageId, started.messageId);
+		assert.equal(delta.runId, started.runId);
+		assert.deepEqual(delta.partial, message, "reconnect resets negotiation, not message identity");
+		bridge.onMessageEnd({ message: structuredClone({ ...message, stopReason: "stop" }) }, ctx as any);
+		const completed = records(reconnected).at(-1).payload.event.payload;
+		assert.equal(completed.messageId, started.messageId);
+		assert.equal(completed.runId, started.runId);
+		assert.equal(records(reconnected).filter((r) => r.payload.event?.type === "message.started").length, 0, "reconnect must not invent another start");
+	} finally { bridge.shutdown(); }
+});
+
+test("heartbeats preserve settling until agent_settled", async () => {
+	const socket = new FakeSocket();
+	const { pi } = fakePi();
+	const { ctx } = fakeCtx();
+	const bridge = new RemotePiBridgeClient({ connectFactory: () => socket });
+	bridge.start(pi as any, ctx as any);
+	socket.emit("connect");
+	sendRegistered(socket, "remote-session-1", 5);
+	try {
+		bridge.onAgentStart(ctx as any);
+		bridge.onAgentEnd({ messages: [] } as any, ctx as any);
+		await wait(15);
+		assert.equal(records(socket).filter((r) => r.type === "bridge.heartbeat").at(-1).payload.state, "settling");
+		bridge.onAgentSettled(ctx as any);
+		await wait(15);
+		assert.equal(records(socket).filter((r) => r.type === "bridge.heartbeat").at(-1).payload.state, "idle");
+	} finally { bridge.shutdown(); }
 });
 
 test("shutdown is idempotent and reports terminal local shutdown once", async () => {

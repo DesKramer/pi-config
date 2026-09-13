@@ -158,6 +158,13 @@ export type BridgeEnvelope<T = Record<string, unknown>> = {
 	payload: T;
 };
 
+/** Additive bridge.register / bridge.registered payload option. Omission or
+ * false keeps legacy partials. Only a true acknowledgement enables omission
+ * of message.delta.partial for text_delta records with a string delta.
+ * delta, contentIndex, identities, other delta fields and completions are unchanged.
+ */
+export type CompactTextDeltaNegotiation = { compactTextDeltas?: boolean };
+
 export type BridgeCommandPayload = {
 	commandId: string;
 	requestId: string;
