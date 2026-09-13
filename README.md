@@ -59,10 +59,29 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `pretty-markdown-code.ts` | Improved markdown/code rendering. |
 | `provider-model-picker.ts` | Provider/model picker helper. |
 | `remote-pi/` | Attached-session Remote Pi bridge over strict LF JSONL Unix socket with fail-open reconnect, snapshots, events, commands, and explicit attached-only capabilities. |
+| `retry.ts` | `/retry` resumes the last failed model request after automatic retries stop. |
 | `skill-dollar.ts` | `$` skill invocation/autocomplete helper. |
 | `tps-status.ts` | Tokens-per-second/status display. |
 | `usage.ts` | Usage/cost/session utility display. |
 | `zsh-user-bash.ts` | Runs user bash commands through zsh/local shell behavior. |
+
+### Retrying after a network failure
+
+Once Pi stops with an error such as `fetch failed`, wait for your connection to recover and run:
+
+```text
+/retry
+```
+
+The command starts another model call using the current session context and selected model. It keeps your original prompt, images, and completed tool results, without rewinding the conversation or resubmitting the prompt. It stores a hidden control message that the extension removes from model context along with the failed partial responses.
+
+`/retry` refuses to run while Pi is busy or has queued messages. It only retries a model error at the end of the active branch, not a successful response, a tool error, or an Escape cancellation. Pi's normal automatic retry settings still apply. If the connection fails again, you can run `/retry` again after Pi stops. It also works after reloading or resuming a failed session.
+
+After updating an installed local package, run `/reload` to load the command. To try just this extension from this checkout:
+
+```bash
+pi -e ./extensions/retry.ts
+```
 
 ### Custom providers
 
