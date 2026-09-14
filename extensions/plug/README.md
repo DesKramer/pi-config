@@ -10,6 +10,10 @@ This Pi extension exposes the local [PLUG](../../../plug) broker through four sh
 
 Every tool invokes `plug --json` directly with `spawn(..., { shell: false })`, forwards Pi's abort signal, enforces a timeout and a combined output limit, and returns the complete PLUG JSON envelope. Oversized output is rejected rather than returning partial/invalid JSON. Errors are bounded, control-character stripped, and redact common bearer/query-secret forms.
 
+## Tool call display
+
+`plug_run` headers show the plugin and command, for example `plug_run github issues list --limit 5`. Long calls truncate to one line. Expand the tool row to see all arguments. Arguments containing spaces or special characters are quoted for display only; execution still forwards the original argv unchanged.
+
 ## Agent prompt guidance
 
 Each PLUG tool contributes a `promptSnippet` to Pi's system-prompt tool list and `promptGuidelines` to its usage instructions. Pi includes this metadata while the corresponding tool is active. No separate `APPEND_SYSTEM.md` is needed, and registration does not probe the broker or authenticate.

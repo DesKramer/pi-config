@@ -138,7 +138,17 @@ No custom themes are currently included.
 
 ### Skills
 
-No skills are currently included. Skills are intentionally machine-specific for this setup.
+[`implementation-plan`](skills/implementation-plan/SKILL.md) works with the user to write a codebase-grounded plan for another coding agent. It covers the full requested change, design decisions, blast radius, implementation steps, and acceptance checks. It does not implement the change or turn the request into a phased rollout.
+
+This skill requires explicit user invocation. Its `disable-model-invocation: true` setting excludes it from the model's available-skills prompt.
+
+```text
+/skill:implementation-plan <your change request>
+```
+
+With the included `skill-dollar.ts` extension, you can also use `$implementation-plan <your change request>`.
+
+The package loads this skill alongside its extensions. After updating an installed local package, run `/reload` or restart Pi. Other machine-specific skills remain outside this repo.
 
 ## What is intentionally not included
 

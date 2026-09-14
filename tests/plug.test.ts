@@ -3,6 +3,8 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { createPlugExtension } from "../extensions/plug/index.ts";
 import {
 	collectPlugStatus,
@@ -18,6 +20,7 @@ type RegisteredTool = {
 	promptSnippet?: string;
 	promptGuidelines?: string[];
 	execute: (...args: any[]) => Promise<any>;
+	renderCall?: ToolDefinition["renderCall"];
 };
 type RegisteredCommand = { handler: (args: string, ctx: any) => Promise<void> };
 
@@ -51,6 +54,50 @@ test("registers four strict tools and forwards argv without interpolation", asyn
 	const result = await tools.get("plug_run")?.execute("id", { plugin: "demo", arguments: args }, undefined);
 	assert.deepEqual(calls[0], ["run", "demo", ...args]);
 	assert.equal(result.content[0].text, JSON.stringify({ ok: true, result: { value: "complete" } }));
+});
+
+function renderRun(args: Record<string, unknown>, expanded = false) {
+	const { tools } = register(async () => { throw new Error("rendering must not execute PLUG"); });
+	const renderCall = tools.get("plug_run")?.renderCall;
+	assert.ok(renderCall);
+	return renderCall(args, {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	} as any, { expanded } as any);
+}
+
+test("plug_run header shows plugin and command while tolerating streaming arguments", () => {
+	assert.deepEqual(renderRun({}).render(80), ["plug_run"]);
+	assert.deepEqual(renderRun({ plugin: "github" }).render(80), ["plug_run github"]);
+	assert.deepEqual(renderRun({ plugin: "github", arguments: [] }).render(80), ["plug_run github"]);
+	assert.deepEqual(renderRun({ plugin: "github", arguments: ["issues", "list", "--limit", "5"] }).render(80), [
+		"plug_run github issues list --limit 5",
+	]);
+	assert.deepEqual(renderRun({ plugin: "github", arguments: ["issues", null] }).render(80), ["plug_run github issues"]);
+});
+
+test("plug_run header quotes literal argv and escapes terminal controls without changing input", () => {
+	const args = { plugin: "demo", arguments: ["search", "two words", "", 'say "hi"', "line\nbreak", "\u001b[31mred", "\u009b31m"] };
+	const original = structuredClone(args);
+	assert.deepEqual(renderRun(args).render(200), [
+		'plug_run demo search "two words" "" "say \\"hi\\"" "line\\nbreak" "\\u001b[31mred" "\\u009b31m"',
+	]);
+	assert.deepEqual(args, original);
+});
+
+test("plug_run header truncates to terminal width and expands to show all arguments", () => {
+	const args = { plugin: "demo", arguments: ["search", "界".repeat(40), "--limit", "10"] };
+	const collapsed = renderRun(args);
+	for (const width of [1, 10, 40, 80]) {
+		const lines = collapsed.render(width);
+		assert.equal(lines.length, 1);
+		assert.ok(visibleWidth(lines[0]) <= width);
+	}
+	assert.ok(!collapsed.render(40).join("").includes("--limit"));
+	const expanded = renderRun(args, true).render(40);
+	assert.ok(expanded.length > 1);
+	assert.ok(expanded.every((line) => visibleWidth(line) <= 40));
+	assert.match(expanded.join(""), /--limit 10/);
 });
 
 test("exposes PLUG discovery, execution, and auth guidance through system-prompt metadata without probing the broker", () => {
