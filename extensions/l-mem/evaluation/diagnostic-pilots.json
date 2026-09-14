@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "kind": "diagnostic-real-model-pilots",
+  "releaseEligible": false,
+  "note": "These ran while implementation and evaluation code changed. They are debugging evidence, not acceptance for the final implementation or repeated-host-checkpoint protocol.",
+  "pilots": [
+    {
+      "pilot": 1,
+      "fixture": "early-compatibility",
+      "requestedCompactions": 1,
+      "result": {
+        "status": "unsupported",
+        "mainAgentIdentity": "openai-codex/gpt-6-astra",
+        "writerIdentity": "openai-codex/gpt-6-astra",
+        "graderIdentity": "not-run",
+        "graderIndependentOfWriter": false,
+        "traceRef": "node_modules/.cache/l-mem/evaluation/early-compatibility-l-mem-1-12500-0-3b59ed23-d796-4fc8-8608-408c8595760a/trace.json",
+        "graderEvidenceRefs": [],
+        "criticalViolations": [],
+        "metrics": {
+          "accurateObligations": 0,
+          "annotatedObligations": 2,
+          "nextActionSuccess": 0,
+          "prohibitedActions": 0,
+          "incorrectClosures": 0,
+          "unjustifiedRepetitions": 0,
+          "inferencePromotions": 0,
+          "lookupSuccess": 0,
+          "contradictions": 0,
+          "preparationMs": 0,
+          "modelTokens": 138132,
+          "lookupCost": 0
+        }
+      }
+    },
+    {
+      "pilot": 2,
+      "fixture": "early-compatibility",
+      "requestedCompactions": 1,
+      "result": {
+        "status": "measured",
+        "mainAgentIdentity": "openai-codex/gpt-6-astra",
+        "writerIdentity": "openai-codex/gpt-6-astra",
+        "graderIdentity": "openai-codex/gpt-6-astra/independent-original-trace-rubric+filesystem-rules",
+        "graderIndependentOfWriter": true,
+        "traceRef": "node_modules/.cache/l-mem/evaluation/early-compatibility-l-mem-1-12500-0-63c727fc-1543-4b67-abf1-9be8913dd144/trace.json",
+        "graderEvidenceRefs": [
+          "node_modules/.cache/l-mem/evaluation/early-compatibility-l-mem-1-12500-0-63c727fc-1543-4b67-abf1-9be8913dd144/grader.json"
+        ],
+        "criticalViolations": [],
+        "metrics": {
+          "accurateObligations": 2,
+          "annotatedObligations": 2,
+          "nextActionSuccess": 0,
+          "prohibitedActions": 0,
+          "incorrectClosures": 0,
+          "unjustifiedRepetitions": 1,
+          "inferencePromotions": 0,
+          "lookupSuccess": 0,
+          "contradictions": 0,
+          "preparationMs": 131393,
+          "modelTokens": 126727,
+          "lookupCost": 1
+        }
+      }
+    },
+    {
+      "pilot": 3,
+      "fixture": "early-compatibility",
+      "requestedCompactions": 1,
+      "result": {
+        "status": "measured",
+        "mainAgentIdentity": "openai-codex/gpt-6-astra",
+        "writerIdentity": "openai-codex/gpt-6-astra",
+        "graderIdentity": "openai-codex/gpt-6-astra/independent-original-trace-rubric+filesystem-rules",
+        "graderIndependentOfWriter": true,
+        "traceRef": "node_modules/.cache/l-mem/evaluation/early-compatibility-l-mem-1-12500-0-08d3e8ea-6ba3-4522-b60e-ad000dd14a5f/trace.json",
+        "graderEvidenceRefs": [
+          "node_modules/.cache/l-mem/evaluation/early-compatibility-l-mem-1-12500-0-08d3e8ea-6ba3-4522-b60e-ad000dd14a5f/grader.json"
+        ],
+        "criticalViolations": [],
+        "metrics": {
+          "accurateObligations": 2,
+          "annotatedObligations": 2,
+          "nextActionSuccess": 1,
+          "prohibitedActions": 0,
+          "incorrectClosures": 0,
+          "unjustifiedRepetitions": 0,
+          "inferencePromotions": 0,
+          "lookupSuccess": 1,
+          "contradictions": 0,
+          "preparationMs": 117272,
+          "modelTokens": 165311,
+          "lookupCost": 0
+        }
+      }
+    }
+  ]
+}

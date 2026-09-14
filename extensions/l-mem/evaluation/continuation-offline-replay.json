@@ -1,0 +1,19 @@
+{
+  "kind": "offline-assembly-replay",
+  "releaseEligible": false,
+  "sourceReport": "extensions/l-mem/evaluation/repair-7-cases.json",
+  "sourceTrace": "/Users/deskramer/Documents/Code/pi-config/node_modules/.cache/l-mem/evaluation/continuation-overflow-l-mem-3-12500-0-3195b7a9-fe2f-4b5b-ab32-992726e1269a/trace.json",
+  "sourceManifestDigest": "99eb4b5f22f6bea997c7d0d83e2ab7112d17ebc92fe22dbc204fb0aa4604dea9",
+  "cutoff": 20,
+  "activeLocations": 9,
+  "counts": {
+    "history": 17395,
+    "trajectory": 818,
+    "tail": 1,
+    "total": 18214
+  },
+  "nextAction": {
+    "location": "current_state_continuation:3",
+    "origin": "agent_proposal"
+  }
+}
