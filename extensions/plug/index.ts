@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	collectPlugStatus,
@@ -14,6 +15,13 @@ const pluginName = Type.String({
 	pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$",
 });
 const noExtraProperties = { additionalProperties: false } as const;
+
+// Display argv boundaries and escape terminal controls. This is never executed as shell text.
+function displayArgument(value: string): string {
+	return /^[A-Za-z0-9_./:@=,+-]+$/.test(value)
+		? value
+		: JSON.stringify(value).replace(/[\u007f-\u009f]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
 
 function result(execution: Awaited<ReturnType<PlugRunner>>) {
 	return {
@@ -65,6 +73,24 @@ export function createPlugExtension(options: { run?: PlugRunner; env?: NodeJS.Pr
 			}, noExtraProperties),
 			async execute(_id, params, signal) {
 				return result(await run(["run", params.plugin, ...params.arguments], { signal }));
+			},
+			renderCall(args, theme, context) {
+				// Arguments can be incomplete while the model is still streaming the call.
+				const plugin = typeof args.plugin === "string" ? displayArgument(args.plugin) : "";
+				const command = Array.isArray(args.arguments)
+					? args.arguments.filter((arg): arg is string => typeof arg === "string").map(displayArgument).join(" ")
+					: "";
+				return {
+					render(width: number) {
+						let text = theme.fg("toolTitle", theme.bold("plug_run"));
+						if (plugin) text += ` ${theme.fg("accent", plugin)}`;
+						if (command) text += ` ${theme.fg("muted", command)}`;
+						return context.expanded
+							? new Text(text, 0, 0).render(width)
+							: [truncateToWidth(text, width)];
+					},
+					invalidate() {},
+				};
 			},
 		});
 
