@@ -1,0 +1,349 @@
+{
+  "schemaVersion": 1,
+  "kind": "structural-smoke",
+  "runs": [
+    {
+      "fixture": "early-compatibility",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "early-compatibility",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "early-compatibility",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "early-compatibility",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "scoped-correction",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "scoped-correction",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "scoped-correction",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "scoped-correction",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "side-question",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "side-question",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "side-question",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "side-question",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "inferred-preference",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "inferred-preference",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "inferred-preference",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "inferred-preference",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "unauthorized-proposal",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "unauthorized-proposal",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "unauthorized-proposal",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "unauthorized-proposal",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "failed-approach",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "failed-approach",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "failed-approach",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "failed-approach",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "stale-tests",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "stale-tests",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "stale-tests",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "stale-tests",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "spanning-operation",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "spanning-operation",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "spanning-operation",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "spanning-operation",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "tool-injection",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "tool-injection",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "tool-injection",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "tool-injection",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "omitted-evidence",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "omitted-evidence",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "omitted-evidence",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "omitted-evidence",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "auxiliary-capture",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "auxiliary-capture",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "auxiliary-capture",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "auxiliary-capture",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "continuation-overflow",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "continuation-overflow",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "continuation-overflow",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "continuation-overflow",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    },
+    {
+      "fixture": "mandatory-capacity",
+      "compactions": 1,
+      "status": "expected-capacity-failure",
+      "coverageChecks": 0
+    },
+    {
+      "fixture": "mandatory-capacity",
+      "compactions": 3,
+      "status": "expected-capacity-failure",
+      "coverageChecks": 0
+    },
+    {
+      "fixture": "mandatory-capacity",
+      "compactions": 5,
+      "status": "expected-capacity-failure",
+      "coverageChecks": 0
+    },
+    {
+      "fixture": "mandatory-capacity",
+      "compactions": 10,
+      "status": "expected-capacity-failure",
+      "coverageChecks": 0
+    },
+    {
+      "fixture": "ambiguous-correction",
+      "compactions": 1,
+      "status": "structural-pass",
+      "coverageChecks": 1
+    },
+    {
+      "fixture": "ambiguous-correction",
+      "compactions": 3,
+      "status": "structural-pass",
+      "coverageChecks": 3
+    },
+    {
+      "fixture": "ambiguous-correction",
+      "compactions": 5,
+      "status": "structural-pass",
+      "coverageChecks": 5
+    },
+    {
+      "fixture": "ambiguous-correction",
+      "compactions": 10,
+      "status": "structural-pass",
+      "coverageChecks": 10
+    }
+  ],
+  "gate": {
+    "enabled": false,
+    "reasons": [
+      "No main-agent behavior was evaluated. FakeModel extracts one obligation per user span and is not a semantic evaluator.",
+      "This smoke run did not test native dispatch or real main-agent behavior."
+    ]
+  }
+}

@@ -1621,6 +1621,23 @@
             "cacheWrite": 0
           },
           "contextWindow": 131072
+        },
+        {
+          "id": "qwen3.8:27b-mlx",
+          "name": "qwen3.8:27b-mlx",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 1000000,
+          "maxTokens": 16384
         }
       ]
     }

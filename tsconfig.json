@@ -15,6 +15,7 @@
     "extensions/orchestrator/**/*.ts",
     "extensions/remote-pi/**/*.ts",
     "extensions/plug/**/*.ts",
+    "extensions/l-mem/**/*.ts",
     "extensions/claude-code-provider/**/*.ts",
     "extensions/fuzzy-file-autocomplete.ts",
     "tests/**/*.ts"
