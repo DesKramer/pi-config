@@ -65,6 +65,21 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `usage.ts` | Usage/cost/session utility display. |
 | `zsh-user-bash.ts` | Runs user bash commands through zsh/local shell behavior. |
 
+### Remote Pi attached-session bridge
+
+The bridge connects to the daemon's owner-only Unix socket. Socket selection matches the daemon:
+
+1. `REMOTE_PI_BRIDGE_SOCKET`, if set.
+2. `bridge.sock` inside `REMOTE_PI_DATA_DIR`, if set.
+3. On Linux, `$XDG_DATA_HOME/remote-pi/bridge.sock` when XDG_DATA_HOME is absolute; otherwise `~/.local/share/remote-pi/bridge.sock`.
+4. On macOS, `~/Library/Application Support/remote-pi/bridge.sock`.
+
+Export any overrides in the shell that starts Pi as well as in the daemon's environment. A service's environment does not automatically reach an existing terminal. Programmatic `socketPath` options take precedence over environment settings. `/remote-pi-status` reports the socket actually selected by the bridge.
+
+After updating this local package, run `/reload` in each open Pi terminal, then `/remote-pi-status`. No daemon restart or phone re-pairing is needed for this path fix. The supported attached commands are prompt, steer, follow-up, and abort; managed-only capabilities remain unavailable on attached sessions.
+
+To run the bridge tests, install dev dependencies with `npm ci`, then run `node --experimental-strip-types --test tests/remote-pi.test.ts`. Fixture decoding expects the `remote-pi` repository checked out beside `pi-config`.
+
 ### Retrying after a network failure
 
 Once Pi stops with an error such as `fetch failed`, wait for your connection to recover and run:

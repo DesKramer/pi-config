@@ -5,6 +5,34 @@ import test from "node:test";
 import { encodeJsonlRecord, StrictLfJsonlParser } from "../extensions/remote-pi/jsonl.ts";
 import { REMOTE_PI_PROTOCOL_VERSION, createAttachedCapabilityMap } from "../extensions/remote-pi/protocol.ts";
 import { RemotePiBridgeClient, createRemotePiExtension, type SocketLike } from "../extensions/remote-pi/index.ts";
+import { resolveBridgeSocketPath } from "../extensions/remote-pi/paths.ts";
+
+test("bridge keeps the macOS default and uses Linux XDG data paths", () => {
+	assert.equal(resolveBridgeSocketPath("darwin", "/Users/demo", { XDG_DATA_HOME: "/xdg" }), "/Users/demo/Library/Application Support/remote-pi/bridge.sock");
+	assert.equal(resolveBridgeSocketPath("linux", "/home/demo", { XDG_DATA_HOME: "/data with spaces" }), "/data with spaces/remote-pi/bridge.sock");
+	for (const env of [{}, { XDG_DATA_HOME: "" }, { XDG_DATA_HOME: "relative" }]) {
+		assert.equal(resolveBridgeSocketPath("linux", "/home/demo", env), "/home/demo/.local/share/remote-pi/bridge.sock");
+	}
+});
+
+test("bridge socket and data overrides match daemon precedence on both hosts", () => {
+	for (const platform of ["darwin", "linux"] as const) {
+		const env = { XDG_DATA_HOME: "/xdg", REMOTE_PI_DATA_DIR: "/custom data" };
+		assert.equal(resolveBridgeSocketPath(platform, "/home/demo", env), "/custom data/bridge.sock");
+		assert.equal(resolveBridgeSocketPath(platform, "/home/demo", { ...env, REMOTE_PI_BRIDGE_SOCKET: "/private/bridge.sock" }), "/private/bridge.sock");
+	}
+});
+
+test("bridge resolves environment at construction and explicit options still win", (t) => {
+	const previous = process.env.REMOTE_PI_BRIDGE_SOCKET;
+	t.after(() => {
+		if (previous === undefined) delete process.env.REMOTE_PI_BRIDGE_SOCKET;
+		else process.env.REMOTE_PI_BRIDGE_SOCKET = previous;
+	});
+	process.env.REMOTE_PI_BRIDGE_SOCKET = "/env/bridge.sock";
+	assert.equal(new RemotePiBridgeClient().getSocketPath(), "/env/bridge.sock");
+	assert.equal(new RemotePiBridgeClient({ socketPath: "/explicit/bridge.sock" }).getSocketPath(), "/explicit/bridge.sock");
+});
 
 class FakeSocket extends EventEmitter implements SocketLike {
 	writes: string[] = [];
@@ -144,7 +172,7 @@ test("strict LF JSONL encodes one LF record and parses bridge fixtures without g
 	assert.equal(crlf[0]?.ok, false, "CRLF is rejected for bridge JSONL");
 
 	for (const name of ["register.jsonl", "heartbeat.jsonl", "snapshot.jsonl", "command-result.jsonl", "event.jsonl"]) {
-		const fixture = readFileSync(`/Users/deskramer/Documents/Code/remote-pi/docs/fixtures/protocol/v1/bridge/${name}`, "utf8");
+		const fixture = readFileSync(new URL(`../../remote-pi/docs/fixtures/protocol/v1/bridge/${name}`, import.meta.url), "utf8");
 		const fixtureParser = new StrictLfJsonlParser();
 		const results = fixtureParser.push(fixture);
 		assert.ok(results.length > 0, name);
@@ -296,9 +324,13 @@ test("available Pi lifecycle hooks are normalized as bridge events with synthesi
 	assert.match(started.payload.runId, /^[0-9a-f-]{36}$/);
 });
 
-test("extension registration exposes local status command and fails open when daemon is unavailable", async () => {
+test("extension registration exposes the actual socket in status and fails open when daemon is unavailable", async () => {
+	const socketPath = "/private/custom data/bridge.sock";
+	const attemptedPaths: string[] = [];
 	const { events, commands } = registerExtension({
-		connectFactory: () => {
+		socketPath,
+		connectFactory: (socketPath) => {
+			attemptedPaths.push(socketPath);
 			throw new Error("ENOENT");
 		},
 		reconnectBaseDelayMs: 1000,
@@ -312,6 +344,9 @@ test("extension registration exposes local status command and fails open when da
 	assert.ok(statusCommand);
 	await statusCommand.handler("", ctx);
 	assert.ok(notifications.at(-1)?.message.includes("Bridge approval dialogs: unsupported"));
+	assert.ok(notifications.at(-1)?.message.includes(`Socket: ${socketPath}\n`));
+	assert.deepEqual(attemptedPaths, [socketPath]);
+	events.get("session_shutdown")?.({ reason: "quit" }, ctx);
 });
 
 test("bridge reconnect uses bounded jittered backoff and re-registers without replaying commands", async () => {

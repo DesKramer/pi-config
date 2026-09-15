@@ -2,8 +2,7 @@ import type { AgentEndEvent, ExtensionAPI, ExtensionContext, SessionBeforeCompac
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { accessSync, constants, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { resolveBridgeSocketPath } from "./paths.ts";
 import { connect as netConnect } from "node:net";
 import { encodeJsonlRecord, StrictLfJsonlParser } from "./jsonl.ts";
 import {
@@ -30,7 +29,7 @@ import {
 } from "./protocol.ts";
 
 export const REMOTE_PI_STATUS_KEY = "remote-pi";
-export const DEFAULT_BRIDGE_SOCKET_PATH = join(homedir(), "Library", "Application Support", "remote-pi", "bridge.sock");
+export const DEFAULT_BRIDGE_SOCKET_PATH = resolveBridgeSocketPath();
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 5000;
 export const DEFAULT_COMMAND_TIMEOUT_MS = 30000;
 
@@ -231,7 +230,7 @@ export class RemotePiBridgeClient {
 	private readonly pendingCommands = new Map<string, PendingCommand>();
 
 	constructor(options: RemotePiBridgeOptions = {}) {
-		this.socketPath = options.socketPath ?? DEFAULT_BRIDGE_SOCKET_PATH;
+		this.socketPath = options.socketPath ?? resolveBridgeSocketPath();
 		this.bridgeVersion = options.bridgeVersion ?? REMOTE_PI_BRIDGE_VERSION;
 		this.connectFactory = options.connectFactory ?? defaultConnectFactory;
 		this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
@@ -290,6 +289,10 @@ export class RemotePiBridgeClient {
 
 	getStatus(): BridgeStatus {
 		return this.status;
+	}
+
+	getSocketPath(): string {
+		return this.socketPath;
 	}
 
 	getSnapshot(): SessionSnapshot {
@@ -826,7 +829,7 @@ export function createRemotePiExtension(options: RemotePiBridgeOptions = {}) {
 					.map(([name, cap]) => `${name}:${cap.reason ?? "unsupported"}`)
 					.join(", ");
 				ctx.ui.notify(
-					`Remote Pi bridge ${bridge.getStatus()}\nSocket: ${DEFAULT_BRIDGE_SOCKET_PATH}\nSession: ${snapshot.sessionId}\nSupported: ${supported || "none"}\nUnsupported: ${unsupported}\nBridge approval dialogs: unsupported by remote-pi.v1; no remote approval wait is performed.`,
+					`Remote Pi bridge ${bridge.getStatus()}\nSocket: ${bridge.getSocketPath()}\nSession: ${snapshot.sessionId}\nSupported: ${supported || "none"}\nUnsupported: ${unsupported}\nBridge approval dialogs: unsupported by remote-pi.v1; no remote approval wait is performed.`,
 					bridge.getStatus() === "connected" ? "info" : "warning",
 				);
 			},
