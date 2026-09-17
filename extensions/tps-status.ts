@@ -148,10 +148,18 @@ function decodeCodexAccountId(token: string): string | undefined {
 }
 
 function formatWindowDuration(seconds: number): string {
-	if (seconds === 0) return "0s";
-	if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
-	if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
-	if (seconds % 60 === 0) return `${seconds / 60}m`;
+	// Drop partial hours for longer countdowns; keep seconds below an hour.
+	if (seconds >= 86_400) {
+		const days = Math.floor(seconds / 86_400);
+		const hours = Math.floor((seconds % 86_400) / 3_600);
+		return `${days}d${hours ? ` ${hours}h` : ""}`;
+	}
+	if (seconds >= 3_600) return `${Math.floor(seconds / 3_600)}h`;
+	if (seconds >= 60) {
+		const minutes = Math.floor(seconds / 60);
+		const remainder = seconds % 60;
+		return `${minutes}m${remainder ? ` ${remainder}s` : ""}`;
+	}
 	return `${seconds}s`;
 }
 
