@@ -53,6 +53,7 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `firecrawl-tools.ts` | Firecrawl search/scrape tools. |
 | `fuzzy-file-autocomplete.ts` | Extends `@` file completion with one-edit typo tolerance using a bounded, ignore-aware `fd` index. |
 | `git-status-widget.ts` | Git status widget/status display. |
+| [`l-mem/`](extensions/l-mem/README.md) | Durable session trajectory memory, shadow preparation, and a checked private pi dispatch runtime. Normal live enable requires behavioral acceptance; explicit experimental opt-in permits unvalidated live use. |
 | `orchestrator/` | Opt-in orchestration prompt layer with a live registry. Off by default; toggle with `/orchestrator`. |
 | `pi-subagents/` | Subagent tooling with five bundled profiles (`orchestrator`, `qa`, `scout`, `web-researcher`, and `worker`), defaulting to `openai-codex/gpt-6-astra`, plus `safe-bash`. |
 | `pi-workflow/` | YAML workflow runner with `/workflow` commands, checkpoint tool, and pinned branch-correct state. |

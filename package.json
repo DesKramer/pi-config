@@ -18,7 +18,10 @@
   "scripts": {
     "apply-config": "node ./scripts/apply-config.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:l-mem": "node --experimental-strip-types --test tests/l-mem*.test.ts",
+    "typecheck:l-mem": "tsc --project extensions/l-mem/tsconfig.json",
+    "eval:l-mem": "node --experimental-strip-types extensions/l-mem/evaluation/runner.ts --smoke --output extensions/l-mem/evaluation/smoke-report.json"
   },
   "dependencies": {
     "yaml": "^2.8.1"
