@@ -13,6 +13,7 @@
     "extensions/pi-workflow/**/*.ts",
     "extensions/pi-subagents/index.ts",
     "extensions/orchestrator/**/*.ts",
+    "extensions/l-mem/**/*.ts",
     "extensions/remote-pi/**/*.ts",
     "extensions/plug/**/*.ts",
     "extensions/claude-code-provider/**/*.ts",

@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "extensions/l-mem/**/*.ts",
+    "tests/l-mem.test.ts"
+  ]
+}

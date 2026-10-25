@@ -53,6 +53,8 @@ This loads the extensions, including `extensions/custom-providers.ts`, which reg
 | `firecrawl-tools.ts` | Firecrawl search/scrape tools. |
 | `fuzzy-file-autocomplete.ts` | Extends `@` file completion with one-edit typo tolerance using a bounded, ignore-aware `fd` index. |
 | `git-status-widget.ts` | Git status widget/status display. |
+| `herdr-prompts.ts` | Reports blocking Pi dialogs, including `ask_user`, as waiting for input in Herdr. |
+| `l-mem/` | Opt-in memory for long sessions across compactions. Immutable snapshot memories, current trajectory, and branch-scoped inspection tools. |
 | `orchestrator/` | Opt-in orchestration prompt layer with a live registry. Off by default; toggle with `/orchestrator`. |
 | `pi-subagents/` | Subagent tooling with five bundled profiles (`orchestrator`, `qa`, `scout`, `web-researcher`, and `worker`), defaulting to `openai-codex/gpt-6-astra`, plus `safe-bash`. |
 | `pi-workflow/` | YAML workflow runner with `/workflow` commands, checkpoint tool, and pinned branch-correct state. |
@@ -79,6 +81,31 @@ Export any overrides in the shell that starts Pi as well as in the daemon's envi
 After updating this local package, run `/reload` in each open Pi terminal, then `/remote-pi-status`. No daemon restart or phone re-pairing is needed for this path fix. The supported attached commands are prompt, steer, follow-up, and abort; managed-only capabilities remain unavailable on attached sessions.
 
 To run the bridge tests, install dev dependencies with `npm ci`, then run `node --experimental-strip-types --test tests/remote-pi.test.ts`. Fixture decoding expects the `remote-pi` repository checked out beside `pi-config`.
+
+### Herdr input alerts
+
+Requires Pi 0.84.4 or newer and Herdr's official Pi integration:
+
+```sh
+herdr integration install pi
+```
+
+Run `/reload` in each running Pi session after installing. `herdr-prompts.ts` bridges Pi's UI prompt events to the official integration, so Herdr shows the agent as blocked while a dialog is open and restores its previous activity state when it closes. Alerts use the generic label "Waiting for your input", not the question text, and follow Herdr's notification settings and focus rules. The bridge does nothing outside Herdr or in headless sessions. Keep Herdr's managed integration installed; the bridge does not replace it.
+
+### Memory across compactions
+
+Requires Pi 0.85.1 or newer. After `/reload`, enable it for a session branch:
+
+```text
+/memory on
+/memory status
+```
+
+It captures roughly 12.5K-token intervals, asks a separate AI call to write each memory block, and replaces normal compaction with up to 30K of memory blocks plus up to 5K of current trajectory. Pi's recent conversation tail is retained separately. Token budgets are estimates.
+
+The writer defaults to your current model. Use `/memory model provider/model` to select another registered model. `/compact` works normally once memory is enabled; `/memory off` returns future compactions to Pi's default behavior.
+
+This adds model calls and stores original session events locally without redaction. It does not retrieve memories from unrelated sessions. See [`extensions/l-mem/README.md`](extensions/l-mem/README.md) for storage, controls, limitations, and tests.
 
 ### Retrying after a network failure
 
@@ -111,7 +138,7 @@ Remote provider API keys are stored as environment references, not committed raw
 - `AZURE_FOUNDRY_TECH_API_KEY`
 - `COSINE_API_KEY`
 
-The `ollama` provider uses the local API at `http://localhost:11434/v1` with the required dummy key `ollama`. Its configured local models are `ornith-1.5:9b` and `granite4.2:3b`.
+The `ollama` provider uses the local API at `http://localhost:11434/v1` with the required dummy key `ollama`. Its configured local models are `ornith-1.5:9b`, `granite4.2:3b`, and `qwen3.8:27b-mlx`.
 
 ### Settings
 

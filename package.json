@@ -18,7 +18,10 @@
   "scripts": {
     "apply-config": "node ./scripts/apply-config.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test:memory": "node --experimental-strip-types --test tests/l-mem.test.ts",
+    "test:memory:pi": "node --experimental-strip-types scripts/test-memory-pi.mjs",
+    "typecheck": "tsc --noEmit",
+    "typecheck:memory": "tsc --noEmit -p tsconfig.memory.json"
   },
   "dependencies": {
     "yaml": "^2.8.1"
