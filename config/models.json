@@ -1,5 +1,33 @@
 {
   "providers": {
+    "openai-codex": {
+      "modelOverrides": {
+        "gpt-5.6-luna": {
+          "contextWindow": 950000
+        },
+        "gpt-5.6-sol": {
+          "contextWindow": 950000
+        },
+        "gpt-5.6-terra": {
+          "contextWindow": 950000
+        },
+        "gpt-6-astra": {
+          "contextWindow": 950000
+        },
+        "gpt-6-luna": {
+          "contextWindow": 950000
+        },
+        "gpt-6-sol": {
+          "contextWindow": 950000
+        },
+        "gpt-6.1-sol": {
+          "contextWindow": 950000
+        },
+        "gpt-6.1-terra": {
+          "contextWindow": 950000
+        }
+      }
+    },
     "cosine": {
       "name": "Cosine",
       "baseUrl": "https://api.cosine.wtf",
