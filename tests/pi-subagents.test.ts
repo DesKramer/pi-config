@@ -209,6 +209,42 @@ test("option builders expose effective agent rows, every registry model, and sup
 	assert.equal(buildThinkingItems(supportedLevels).some((item) => item.value === "max"), false);
 });
 
+test("model options fall back to the ID when a registry entry has no display name", () => {
+	for (const name of [undefined, null, ""]) {
+		const model = Object.assign(testModel("openai", "unnamed"), { name });
+		const routedModel = testModel("openrouter", "deep");
+		routedModel.name = "Deep (Anthropic: routed)";
+
+		const items = buildModelItems([routedModel, model]);
+		assert.deepEqual(items[0], {
+			value: "openai/unnamed",
+			label: "openai/unnamed",
+			description: "unnamed · 100k ctx",
+		});
+		assert.equal(items[1].description, "Deep (Anthropic: routed) · via Anthropic · 100k ctx");
+		assert.deepEqual(filterSelectItems(items, "unnamed").map((item) => item.value), ["openai/unnamed"]);
+	}
+});
+
+test("settings wizard can select a model without a display name for one or all agents", async () => {
+	const model = testModel("openai", "unnamed");
+	Reflect.deleteProperty(model, "name");
+	const worker = testAgent("worker");
+	const scout = testAgent("scout");
+
+	for (const target of ["worker", "__all__"]) {
+		clearAllAgentOverrides();
+		try {
+			const { result } = await runWizardWithPicks([worker, scout], [model], [target, "openai/unnamed", "off"]);
+			assert.equal(result, true);
+			assert.deepEqual(getAgentOverride("worker"), { model: "openai/unnamed", thinking: "off" });
+			assert.equal(getAgentOverride("scout")?.model, target === "__all__" ? "openai/unnamed" : undefined);
+		} finally {
+			clearAllAgentOverrides();
+		}
+	}
+});
+
 test("model options support fuzzy search across provider, id, and display name", () => {
 	const models = [
 		testModel("anthropic", "claude-sonnet-4-6"),

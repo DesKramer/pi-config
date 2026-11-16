@@ -1546,12 +1546,13 @@ export function formatInferenceProvider(inference: string | undefined, routingPr
 export function buildModelItems(models: readonly Model<Api>[]): SelectItem[] {
 	return models
 		.map((model) => {
-			const inference = extractInferenceProvider(model.name);
+			const name = model.name || model.id;
+			const inference = extractInferenceProvider(name);
 			const via = formatInferenceProvider(inference, model.provider);
 			return {
 				value: canonicalModelRef(model),
 				label: canonicalModelRef(model),
-				description: [model.name, via, formatModelContext(model.contextWindow)].filter(Boolean).join(" · "),
+				description: [name, via, formatModelContext(model.contextWindow)].filter(Boolean).join(" · "),
 			};
 		})
 		.sort((a, b) => a.value.localeCompare(b.value));
